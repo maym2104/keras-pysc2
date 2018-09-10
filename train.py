@@ -139,7 +139,7 @@ def main():
     if args.adam:
         optimizer = Adam(lr=lr, beta_1=0.9, beta_2=0.999, epsilon=1e-8, clipnorm=args.grad_norm, decay=decay)
     else:
-        optimizer = RMSprop(lr=args.lr, epsilon=1e-5, decay=decay, clipnorm=args.grad_norm)
+        optimizer = RMSprop(lr=lr, epsilon=1e-5, decay=decay, clipnorm=args.grad_norm)
     model.init_model(envs.observation_space, len(envs.action_space.functions), opt=optimizer, graph_path=summary_path)
 
     # Loads only the weights for now, hence the prior initialization of the model
@@ -167,7 +167,7 @@ def main():
                 _save_if_training(model, i)
 
             assert model.model is not None
-            loss, *_ = runner.run_batch(write_summary, i)
+            loss = runner.run_batch(write_summary, i)
             if write_summary:
                 print('iter %d: loss = %f' % (i, loss), flush=True)
                 summary_writer.flush()

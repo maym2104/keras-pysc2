@@ -6,7 +6,7 @@ from collections import namedtuple
 from keras.layers import *
 from keras.models import Sequential, Model
 import keras.backend as k
-from keras.losses import categorical_crossentropy, mse
+from keras.losses import categorical_crossentropy, mse, sparse_categorical_crossentropy
 from tensorflow import split, to_int32
 import tensorflow as tf
 
@@ -201,6 +201,7 @@ class BaseModel:
             model.add(Conv2D(1, (1, 1), name=arg_t.name+'_conv', data_format=self.data_format,
                              input_shape=spatial_input_shape, batch_size=self.batch_size))
             model.add(Flatten(data_format=self.data_format, name=arg_t.name+'_flat'))
+            model.add(Reshape((32*32,), name=arg_t.name+'_resolve_shape'))
             model.add(Activation('softmax', name=arg_t.name+'_softmax'))
 
             return model
@@ -251,7 +252,7 @@ class BaseModel:
         labels = [sampled_actions, returns] + actions[1:]  # self.args_mask(actions[1:], action_ids)
         batch_size = returns.shape[0]
         loss = self.trainable_model.train_on_batch(observations + labels + [np.array([step] * batch_size)],
-                                                   [np.zeros((batch_size,)) for _ in range(3)])  # dummy targets
+                                                   [np.zeros((batch_size,))])  # dummy targets
 
 
         # summary
@@ -265,9 +266,9 @@ class BaseModel:
             self.writer.add_summary(return_summary, global_step=step)
             self.writer.add_summary(reward_summary, global_step=step)
             self.writer.add_summary(adv_summary, global_step=step)
-            for name, value in zip(self.trainable_model.metrics_names, loss):
-                summary = tf.Summary(value=[tf.Summary.Value(tag=name, simple_value=value), ])
-                self.writer.add_summary(summary, global_step=step)
+            #for name, value in zip(self.trainable_model.metrics_names, loss):
+            summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=loss), ])
+            self.writer.add_summary(summary, global_step=step)
 
         return loss
 
@@ -276,16 +277,21 @@ class BaseModel:
         return pred
 
     def compile(self, opt):
+        self.model.compile(optimizer='sgd', loss='mse')
+        # self.target_model.compile(optimizer=opt, loss=self.dummy_loss_function)
         y_pred_list = self.model.output
         y_true_list = []
-        y_true_list.append(Input(shape=(len(actions.FUNCTIONS),), name='pi_sampled'))
+        #y_true_list.append(Input(shape=(len(actions.FUNCTIONS),), name='pi_sampled'))
+        y_true_list.append(Input(shape=(1,), name='pi_sampled'))
         y_true_list.append(Input(shape=(1, ), name='return'))
 
         for arg_type in actions.TYPES:
             if arg_type in [actions.TYPES.minimap, actions.TYPES.screen, actions.TYPES.screen2]:
-                sample = Input(shape=(32*32, ), name=arg_type.name+'_true')
+                #sample = Input(shape=(32*32, ), name=arg_type.name+'_true')
+                sample = Input(shape=(1, ), name=arg_type.name+'_true')
             else:
-                sample = Input(shape=(arg_type.sizes[0],), name=arg_type.name+'_true')
+                #sample = Input(shape=(arg_type.sizes[0],), name=arg_type.name+'_true')
+                sample = Input(shape=(1,), name=arg_type.name+'_true')
 
             y_true_list.append(sample)
 
@@ -297,27 +303,32 @@ class BaseModel:
         policy_losses = []
         entropies = []
         for y_pred, y_true in zip(policy_and_args, pi_samples):
-            policy_losses.append(Lambda(self.policy_gradient_loss)([adv, y_pred, y_true]))
+            policy_losses.append(Lambda(self.policy_gradient_loss)([y_true, y_pred]))
             entropies.append(Lambda(self.entropy)(y_pred))
 
         policy_loss = Lambda(k.stack, arguments={'axis': -1})(policy_losses)
         policy_loss = Lambda(k.sum, arguments={'axis': -1})(policy_loss)
-        policy_loss = Lambda(k.mean, name='policy_loss')(policy_loss)
+        adv = Lambda(k.squeeze, arguments={'axis': -1})(adv)
+        policy_loss = Lambda(lambda args: -k.mean(args[0]*args[1]), name='policy_loss')([adv, policy_loss])
 
-        value_loss = Lambda(self.value_loss, name='mse')([y_true_list[1], y_pred_list[1]])
+        value_loss = Lambda(lambda args: k.square(args[0]-args[1]) / 2., name='mse')([y_true_list[1], y_pred_list[1]])
         value_loss = Lambda(k.mean, name='value_loss')(value_loss)
 
         entropy = Lambda(k.stack, arguments={'axis': -1})(entropies)
         entropy = Lambda(k.sum, arguments={'axis': -1})(entropy)
-        entropy = Lambda(lambda x: -k.mean(x), name='entropy')(entropy)
+        entropy = Lambda(lambda x: k.mean(x), name='entropy')(entropy)
 
         entropy_coeff = self.entropy_coeff
         entropy_coeff *= (1. / (1. + 0.99 * it[0, 0]))
 
+        loss = Lambda(lambda args: args[0] + self.value_loss_coeff * args[1] - entropy_coeff * args[2])([policy_loss,
+                                                                                                         value_loss,
+                                                                                                         entropy])
+
         self.trainable_model = Model(inputs=self.model.input + y_true_list + [it],
-                                     outputs=[policy_loss, value_loss, entropy])
-        self.trainable_model.compile(optimizer=opt, loss=lambda yt, yp: yp,
-                                     loss_weights=[1., self.value_loss_coeff, entropy_coeff])
+                                     outputs=[loss])
+        self.trainable_model.compile(optimizer=opt, loss=lambda yt, yp: yp) #,
+                                     #loss_weights=[1., self.value_loss_coeff, entropy_coeff])
 
     # pickle or json?
     def save(self, name, num_iters):
@@ -342,15 +353,16 @@ class BaseModel:
             self.model.load_weights("{}.h5".format(name))
 
     def policy_gradient_loss(self, args):
-        advantage, y_pred, y_true = args
-        adv = k.squeeze(advantage, axis=-1)
+        y_true, y_pred = args
+        #adv = k.squeeze(advantage, axis=-1)
 
-        policy_loss = adv * self.compute_neg_log_prob(y_true, y_pred)
+        policy_loss = sparse_categorical_crossentropy(y_true, y_pred)  # self.compute_log_prob(y_true, y_pred)
 
         return policy_loss
 
     def entropy(self, y_pred):
-        entropy = categorical_crossentropy(y_pred, y_pred)
+        # entropy = categorical_crossentropy(y_pred, y_pred)
+        entropy = -k.sum(y_pred * k.log(k.clip(y_pred, 1e-12, 1.0)), axis=-1)
 
         return entropy
 
@@ -358,8 +370,11 @@ class BaseModel:
         y_true, y_pred = args
         return mse(y_pred, y_true) / 2.
 
-    def compute_neg_log_prob(self, y_true, y_pred):
-        return -k.sum(y_true * k.log(k.clip(y_pred, 1e-12, 1.0)), axis=-1)
+    def compute_log_prob(self, y_true, y_pred):
+        return k.sum(y_true * k.log(k.clip(y_pred, 1e-12, 1.0)), axis=-1)
+
+    def dummy_loss_function(self, y_true, y_pred):
+        return k.zeros_like(y_true)
 
     def normalization(self, x):
         return x / k.clip(k.sum(x, axis=-1, keepdims=True), 1e-12, 1.0)

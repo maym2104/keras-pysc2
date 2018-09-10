@@ -10,7 +10,7 @@ class LSTMModel(BaseModel):
                  value_loss_coeff=0.1, entropy_coeff=1e-1, batch_size=32, learning_rate=1e-4,
                  data_format='channels_first'):
 
-        super().__init__(summary_writer, start_point, seed, value_loss_coeff, entropy_coeff, batch_size, learning_rate, data_format)
+        super(LSTMModel, self).__init__(summary_writer, start_point, seed, value_loss_coeff, entropy_coeff, batch_size, learning_rate, data_format)
 
         self.seq_length = None  # seq_length
 

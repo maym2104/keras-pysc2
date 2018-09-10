@@ -87,10 +87,11 @@ class A2CRunner:
         rewards = np.zeros(shapes, dtype=np.float32)
         dones = np.zeros(shapes, dtype=np.float32)
         all_scores = []
+        all_samples = []
 
         obs_raw = self.last_obs
         all_actions = last_action = self.last_action
-        all_obs = last_obs = self.transform_obs(obs_raw, last_action) # self.last_obs
+        all_obs = last_obs = self.transform_obs(obs_raw, last_action)  # self.last_obs
         episode_over = False
         last_state = None
 
@@ -111,6 +112,7 @@ class A2CRunner:
                 last_state = None
             args = args[:13]
             last_action = self.transform_actions([pi_samples] + args)
+            all_samples.append([pi_samples] + args)
             all_actions = [np.concatenate([old_act, new_act], axis=1) for old_act, new_act in zip(all_actions, last_action)]
 
             actions = self.envs.step_agent(obs_raw, [pi_samples] + args)
@@ -141,14 +143,16 @@ class A2CRunner:
         else:
             predictions = self.model.predict([np.squeeze(ob, axis=1) for ob in last_obs])
         next_values = predictions[1][:, 0]
+        rewards = rewards[:, :n+1]
+        values = values[:, :n+1]
 
         returns, advs = compute_returns_advantages(rewards, dones, values, next_values, self.discount)
 
-        actions = [l_a[:, 1:] for l_a in all_actions]
+        actions = [np.stack(act, axis=1) for act in zip(*all_samples)]  # [l_a[:, 1:] for l_a in all_actions]
         obs = [ob[:, :n+1] for ob in all_obs]
         returns = np.expand_dims(np.transpose(returns), axis=-1)[:, :n+1, :]
         advs = np.expand_dims(np.transpose(advs)[:, :n+1], axis=-1)
-        rewards = np.transpose(rewards)[:, :n+1]
+        rewards = np.transpose(rewards)
 
         if not self.temporal:
             flatten_batch_shape = (self.envs.num_envs * (n+1), )
