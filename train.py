@@ -10,10 +10,10 @@ from functools import partial
 from sc2_dl.a2c.a2cRunner import A2CRunner
 from sc2_dl.agents.a2c_agent import A2CAgent
 from sc2_dl.enviros.sc2_vec_env import SubprocVecEnv
-from sc2_dl.models.fully_conv_model import BaselineModel
-from sc2_dl.models.control_agent_model import LSTMModel
+from sc2_dl.models.fully_conv_model import FullyConvModel
+from sc2_dl.models.control_agent_model import ControlAgentModel
 from pysc2.env.sc2_env import *
-from keras.optimizers import RMSprop, Adam
+from keras.optimizers import RMSprop, Adam, TFOptimizer
 import tensorflow as tf
 import numpy as np
 
@@ -47,6 +47,7 @@ parser.add_argument('--entropy_weight', type=float, default=1e-1, help='weight o
 parser.add_argument('--value_loss_weight', type=float, default=0.1, help='weight of value function loss')
 parser.add_argument('--lr', type=float, default=1e-4, help='initial learning rate')
 parser.add_argument('--grad_norm', type=float, default=100.0, help='global gradient norm for clipping')
+parser.add_argument('--decay', type=float, default=1e-12, help='Linear decay of learning rate (and entropy weight) parameter. Should be between 0 and 1')
 parser.add_argument('--save_dir', type=str, default=os.path.join('out', 'models'), help='root directory for checkpoint storage')
 parser.add_argument('--summary_dir', type=str, default=os.path.join('out', 'summary'), help='root directory for summary storage')
 parser.add_argument('--use_max', action='store_true', help='Always choose action with max probability')
@@ -58,7 +59,7 @@ args = parser.parse_args()
 args.train = not args.eval
 
 #Don't do that on compute canada
-os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+#os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
 
 ckpt_path = os.path.join(args.save_dir, args.experiment_id)
@@ -103,9 +104,14 @@ def main():
     if num_no_vis > 0:
         env_fns.extend([partial(make_sc2env, **env_args)] * num_no_vis)
 
+    agent = A2CAgent(
+        model_file=args.experiment_id
+        )
+    envs = SubprocVecEnv(env_fns=env_fns, agent=agent)
+
     summary_writer = tf.summary.FileWriter(summary_path)
     if args.use_lstm:
-        model = LSTMModel(
+        model = ControlAgentModel(
             value_loss_coeff=args.value_loss_weight,
             entropy_coeff=args.entropy_weight,
             learning_rate=args.lr,
@@ -113,38 +119,20 @@ def main():
             summary_writer=summary_writer,
             seq_length=args.steps_per_batch,
             start_point=args.start_point,
-            data_format='channels_last' if args.nhwc else 'channels_first'
+            data_format='channels_last' if args.nhwc else 'channels_first',
+            decay=args.decay
         )
     else:
-        model = BaselineModel(
+        model = FullyConvModel(
             value_loss_coeff=args.value_loss_weight,
             entropy_coeff=args.entropy_weight,
             learning_rate=args.lr,
-            batch_size=args.envs,  # * args.steps_per_batch,
+            batch_size=args.envs,
             summary_writer=summary_writer,
             start_point=args.start_point,
-            data_format='channels_last' if args.nhwc else 'channels_first'
+            data_format='channels_last' if args.nhwc else 'channels_first',
+            decay=args.decay
         )
-
-    agent = A2CAgent(
-        model_file=args.experiment_id
-        )
-
-    # opponent_types = [IdleAgent, SmartAggressiveAgent, SmartDefensiveAgent, DumbDefensiveAgent, DumbAggressiveAgent]
-
-    envs = SubprocVecEnv(env_fns=env_fns, agent=agent)
-
-    lr = args.lr
-    decay = 0.99
-    if args.adam:
-        optimizer = Adam(lr=lr, beta_1=0.9, beta_2=0.999, epsilon=1e-8, clipnorm=args.grad_norm, decay=decay)
-    else:
-        optimizer = RMSprop(lr=lr, epsilon=1e-5, decay=decay, clipnorm=args.grad_norm)
-    model.init_model(envs.observation_space, len(envs.action_space.functions), opt=optimizer, graph_path=summary_path)
-
-    # Loads only the weights for now, hence the prior initialization of the model
-    if os.path.exists(ckpt_path):
-        model.load(ckpt_path, args.start_point)
 
     runner = A2CRunner(
         envs=envs,
@@ -155,6 +143,33 @@ def main():
         summary_writer=summary_writer,
         temporal=args.use_lstm,
         n_steps=args.steps_per_batch)
+
+    lr = args.lr
+    decay = args.decay
+    if args.adam:
+        optimizer = Adam(lr=lr, beta_1=0.9, beta_2=0.999, epsilon=1e-8, clipnorm=args.grad_norm, decay=decay)
+        #optimizer = {'class_name': 'adam',
+        #             'config': {'lr': lr,
+        #                        'beta_1': 0.9,
+        #                        'beta_2': 0.999,
+        #                        'epsilon': 1e-8,
+        #                        'decay': decay,
+        #                        'clipnorm': args.grad_norm}}
+        #optimizer = TFOptimizer(tf.train.AdamOptimizer(learning_rate=lr))
+    else:
+        #optimizer = TFOptimizer(tf.train.RMSPropOptimizer(learning_rate=lr, decay=0.99, epsilon=1e-5))
+        #optimizer = {'class_name': 'rmsprop',
+        #             'config': {'lr': lr,
+        #                        'rho': 0.99,
+        #                        'epsilon': 1e-5,
+        #                        'decay': decay,
+        #                        'clipnorm': args.grad_norm}}
+        optimizer = RMSprop(lr=lr, rho=0.99, epsilon=1e-5, decay=decay, clipnorm=args.grad_norm)
+    model.init_model(envs.observation_space, len(envs.action_space.functions), opt=optimizer, graph_path=summary_path)
+
+    # Loads only the weights for now, hence the prior initialization of the model
+    if os.path.exists(ckpt_path):
+        model.load(ckpt_path, args.start_point)
 
     runner.reset()
 

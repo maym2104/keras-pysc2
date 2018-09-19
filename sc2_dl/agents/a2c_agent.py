@@ -1,7 +1,7 @@
+import os
+import numpy as np
 from pysc2.agents import base_agent
-from pysc2.lib import actions, features
-
-from keras.backend import *
+from pysc2.lib import actions
 
 from absl import logging
 
@@ -56,7 +56,6 @@ class A2CAgent(base_agent.BaseAgent):
         logging.debug('Action %s', act)
 
         return act
-
 
     def actions_to_pysc2(self, a_0, arg_ids):
         """Convert agent action representation to FunctionCall representation."""

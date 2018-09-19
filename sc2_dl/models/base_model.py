@@ -4,10 +4,9 @@ import numpy as np
 from collections import namedtuple
 
 from keras.layers import *
-from keras.models import Sequential, Model
+from keras.models import Sequential, Model, load_model
 import keras.backend as k
 from keras.losses import categorical_crossentropy, mse, sparse_categorical_crossentropy
-from tensorflow import split, to_int32
 import tensorflow as tf
 
 from pysc2.lib import features, actions
@@ -34,7 +33,7 @@ FLAT_ACTION_TYPES = [t for t in actions.TYPES if t not in [actions.TYPES.minimap
 
 
 class BaseModel:
-    def __init__(self, summary_writer=tf.summary.FileWriter('./train'), start_point=0, seed=123456,
+    def __init__(self, summary_writer=tf.summary.FileWriter('./train'), start_point=0, seed=123456, decay=1e-12,
                  value_loss_coeff=0.1, entropy_coeff=1e-1, batch_size=16, learning_rate=1e-4,
                  data_format='channels_first'):
         self.model = None
@@ -47,6 +46,7 @@ class BaseModel:
         self.seed = seed
         self.data_format = data_format
         self.channel_axis = -1 if self.data_format == 'channels_last' else -3
+        self.decay = decay
 
         # summary
         self.writer = summary_writer
@@ -62,6 +62,7 @@ class BaseModel:
         # config.gpu_options.per_process_gpu_memory_fraction = 0.5
 
         # Create a session with the above options specified.
+        k.clear_session()
         k.set_session(tf.Session(config=config))
         k.set_image_data_format(self.data_format)
         k.set_epsilon(1e-12)
@@ -97,56 +98,63 @@ class BaseModel:
     # and log the scalar values to avoid too large values
     def preprocess_spatial_obs(self, feature_types, input_shape, embed_size=10):
         x = Input(batch_shape=(self.batch_size, ) + input_shape)
+        xs = Lambda(lambda _x: _x[:, :, :, :len(feature_types)])(x)
+        xs = Lambda(tf.split, arguments={'num_or_size_splits': len(feature_types), 'axis': -1})(xs)
         layers = []
 
         def cat_case(feat_type):
-            model = Sequential(name=s.name + '_preprocess_model')
-            model.add(Lambda(lambda x: k.one_hot(k.cast(x[:, :, :, feat_type.index], dtype='int32'), feat_type.scale),
-                             name='preprocess_'+feat_type.name+'_to_one_hot', input_shape=input_shape,
+            m = Sequential(name=s.name + '_preprocess_model')
+            m.add(Lambda(lambda _x: k.one_hot(k.cast(k.squeeze(_x, -1), dtype='int32'), feat_type.scale),
+                             name='preprocess_'+feat_type.name+'_to_one_hot', input_shape=input_shape[:-1] + (1,),
                              batch_size=self.batch_size))
             if self.data_format == 'channels_first':
-                model.add(Permute((3, 1, 2), name='preprocess_' + feat_type.name + '_to_NCHW'))
-            model.add(Conv2D(embed_size, 1, padding='same', activation='relu',
+                m.add(Permute((3, 1, 2), name='preprocess_' + feat_type.name + '_to_NCHW'))
+            m.add(Conv2D(embed_size, 1, padding='same', activation='relu',
                              name='preprocess_'+feat_type.name+'_conv', data_format=self.data_format))
 
-            return model
+            return m
 
         def scalar_case(feat_type):
-            model = Sequential(name=feat_type.name + '_preprocess_model')
-            model.add(Lambda(lambda x: k.log(x[:, :, :, feat_type.index:feat_type.index+1]+1.0), name='preprocess_'+feat_type.name+'_log',
-                             input_shape=input_shape, batch_size=self.batch_size))
+            m = Sequential(name=feat_type.name + '_preprocess_model')
+            m.add(Lambda(lambda _x: k.log(_x + 1.0),
+                         name='preprocess_' + feat_type.name + '_log',
+                         input_shape=input_shape[:-1] + (1,), batch_size=self.batch_size))
             if self.data_format == 'channels_first':
-                model.add(Permute((3, 1, 2), name='preprocess_' + feat_type.name + '_to_NCHW'))
+                m.add(Permute((3, 1, 2), name='preprocess_' + feat_type.name + '_to_NCHW'))
 
-            return model
+            return m
 
         for s in feature_types:
             if s.type == features.FeatureType.CATEGORICAL:
-                layer = cat_case(s)(x)
+                layer = cat_case(s)(xs[s.index])
             elif s.type == features.FeatureType.SCALAR:
-                layer = scalar_case(s)(x)
+                layer = scalar_case(s)(xs[s.index])
             else:
                 raise NotImplementedError
             layers.append(layer)
 
-        last_actions = Lambda(lambda x: x[:, :, :, len(feature_types):])(x)
+        last_actions = Lambda(lambda _x: _x[:, :, :, len(feature_types):])(x)
         if self.data_format == 'channels_first':
             last_actions = Permute((3, 1, 2), name='preprocess_last_acts_to_NCHW')(last_actions)
         layers.append(last_actions)
 
         y = Concatenate(axis=self.channel_axis, name='preprocess_spatial_concat')(layers)
 
-        return Model(inputs=[x], outputs=[y], name='preprocess_spatial_model')
+        model = Model(inputs=[x], outputs=[y], name='preprocess_spatial_model')
+        model.compile(optimizer='sgd', loss='mse')
+
+        return model
 
     # TODO instead of resulting of a NHWC tensor, its shape should be NHW1 where every channel is merged into a single one
     def preprocess_nonspatial_obs(self, feature_types, input_shape, embed_size=10):
         x = Input(batch_shape=(self.batch_size,) + input_shape)
+        xs = Lambda(tf.split, arguments={'num_or_size_splits': len(feature_types), 'axis': -1})(x)
         layers = []
 
         def cat_case(feat_type):
             model = Sequential(name=feat_type.name + '_preprocess_model')
-            model.add(Lambda(lambda x: k.one_hot(k.cast(x[:, feat_type.index], dtype='int32'), feat_type.scale),
-                             name='preprocess_'+feat_type.name+'_to_one_hot', input_shape=input_shape,
+            model.add(Lambda(lambda _x: k.one_hot(k.cast(k.squeeze(_x, axis=-1), dtype='int32'), feat_type.scale),
+                             name='preprocess_'+feat_type.name+'_to_one_hot', input_shape=input_shape[:-1] + (1,),
                              batch_size=self.batch_size))
             model.add(Dense(embed_size, activation='relu', name='preprocess_'+feat_type.name+'_embed'))
 
@@ -154,41 +162,26 @@ class BaseModel:
 
         def actions_model(start, scale):
             model = Sequential()
-            j = start
-            model.add(Lambda(lambda x: x[:, j:j+scale], input_shape=input_shape, batch_size=self.batch_size))
+            model.add(Lambda(lambda _x: k.slice(_x, start=[0, start], size=[-1, scale]), input_shape=input_shape,
+                             batch_size=self.batch_size))
             model.add(Dense(embed_size, activation='relu'))
 
             return model
 
         for s in feature_types:
             if s.type == features.FeatureType.CATEGORICAL:
-                layer = cat_case(s)(x)
+                layer = cat_case(s)(xs[s.index])
             elif s.type == features.FeatureType.SCALAR:
-                layer = Lambda(lambda x: k.log(x[:, s.index:s.index+1]+1.0), name='preprocess_'+s.name+'_log')(x)
+                layer = Lambda(lambda _x: k.log(_x+1.0), name='preprocess_'+s.name+'_log')(xs[s.index])
             else:
                 raise NotImplementedError
             layers.append(layer)
 
-        i = len(feature_types)
-        # available_actions
-        avail_acts = actions_model(i, len(actions.FUNCTIONS))(x)
-        layers.append(avail_acts)
-        i += len(actions.FUNCTIONS)
-
-        # last_action
-        last_act = actions_model(i, len(actions.FUNCTIONS))(x)
-        layers.append(last_act)
-        i += len(actions.FUNCTIONS)
-
-        # last action args
-        for arg_type in FLAT_ACTION_TYPES:
-            layer = actions_model(i, arg_type.sizes[0])(x)
-            layers.append(layer)
-            i += arg_type.sizes[0]
-
         y = Concatenate(axis=-1, name='preprocess_non_spatial_concat')(layers)
 
-        return Model(inputs=[x], outputs=[y], name='preprocess_non_spatial_model')
+        mod = Model(inputs=[x], outputs=[y], name='preprocess_non_spatial_model')
+
+        return mod
 
     def args_output(self, pi_input_shape, spatial_input_shape):
         pi_embed = Input(batch_shape=(self.batch_size,) + pi_input_shape, name='pi_embed')
@@ -201,7 +194,8 @@ class BaseModel:
             model.add(Conv2D(1, (1, 1), name=arg_t.name+'_conv', data_format=self.data_format,
                              input_shape=spatial_input_shape, batch_size=self.batch_size))
             model.add(Flatten(data_format=self.data_format, name=arg_t.name+'_flat'))
-            model.add(Reshape((32*32,), name=arg_t.name+'_resolve_shape'))
+            flatten_shape = k.int_shape(model.output)[1:]
+            model.add(Reshape(flatten_shape, name=arg_t.name+'_resolve_shape'))
             model.add(Activation('softmax', name=arg_t.name+'_softmax'))
 
             return model
@@ -223,8 +217,7 @@ class BaseModel:
         model.add(self.preprocess_spatial_obs(feature_types, input_shape))
         model.add(ZeroPadding2D(name='1_1_0_padding_'+prefix, data_format=self.data_format))
         model.add(Conv2D(32, (4, 4), strides=2, activation='relu', name='conv1_'+prefix, data_format=self.data_format))
-        res_shape = [16, 16, 16]
-        res_shape[self.channel_axis] = 32
+        res_shape = k.int_shape(model.output)[1:]
         model.add(self.residual_block(input_shape=tuple(res_shape)))
         model.add(MaxPool2D(name='max_pool_'+prefix, data_format=self.data_format))
 
@@ -232,7 +225,8 @@ class BaseModel:
 
     def broadcast_along_channels(self, input_shape, size2d, name='non_spatial'):
         model = Sequential(name=name+'_broadcast_model')
-        model.add(RepeatVector(np.asscalar(np.prod(size2d)), name=name+'_tile', input_shape=input_shape, batch_size=self.batch_size))
+        model.add(RepeatVector(np.asscalar(np.prod(size2d)), name=name+'_tile', input_shape=input_shape,
+                               batch_size=self.batch_size))
         model.add(Reshape(size2d + input_shape, name=name+'_unflatten'))
 
         if self.data_format == 'channels_first':
@@ -245,15 +239,12 @@ class BaseModel:
     # param returns: nstep sum of rewards + value obtained from taking actions according to policy, according to observations
     # param advantages: returns - values
     # param actions: actions sampled from network policy
-    def train_reinforcement(self, observations, actions, returns, advantages,
+    def train_reinforcement(self, observations, actions, returns, advantages, masks,
                             write_summary=False, step=None, rewards=None, reset_states=False, states=None):
-        sampled_actions = actions[0]
-
-        labels = [sampled_actions, returns] + actions[1:]  # self.args_mask(actions[1:], action_ids)
+        labels = [returns] + actions
         batch_size = returns.shape[0]
-        loss = self.trainable_model.train_on_batch(observations + labels + [np.array([step] * batch_size)],
+        loss = self.trainable_model.train_on_batch(observations + labels + masks + [np.array([step] * batch_size)],
                                                    [np.zeros((batch_size,))])  # dummy targets
-
 
         # summary
         if write_summary:
@@ -266,7 +257,6 @@ class BaseModel:
             self.writer.add_summary(return_summary, global_step=step)
             self.writer.add_summary(reward_summary, global_step=step)
             self.writer.add_summary(adv_summary, global_step=step)
-            #for name, value in zip(self.trainable_model.metrics_names, loss):
             summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=loss), ])
             self.writer.add_summary(summary, global_step=step)
 
@@ -277,107 +267,118 @@ class BaseModel:
         return pred
 
     def compile(self, opt):
-        self.model.compile(optimizer='sgd', loss='mse')
-        # self.target_model.compile(optimizer=opt, loss=self.dummy_loss_function)
         y_pred_list = self.model.output
         y_true_list = []
-        #y_true_list.append(Input(shape=(len(actions.FUNCTIONS),), name='pi_sampled'))
-        y_true_list.append(Input(shape=(1,), name='pi_sampled'))
+        masks = []
+        input_masks = []
         y_true_list.append(Input(shape=(1, ), name='return'))
+        y_true_list.append(Input(shape=(2,), name='pi_sampled', dtype='int32'))
 
         for arg_type in actions.TYPES:
             if arg_type in [actions.TYPES.minimap, actions.TYPES.screen, actions.TYPES.screen2]:
-                #sample = Input(shape=(32*32, ), name=arg_type.name+'_true')
-                sample = Input(shape=(1, ), name=arg_type.name+'_true')
+                sample = Input(shape=(2, ), name=arg_type.name+'_true', dtype='int32')
             else:
-                #sample = Input(shape=(arg_type.sizes[0],), name=arg_type.name+'_true')
-                sample = Input(shape=(1,), name=arg_type.name+'_true')
+                sample = Input(shape=(2,), name=arg_type.name+'_true', dtype='int32')
 
+            mask = Input(shape=(1,), name=arg_type.name+'_mask')
+            input_masks.append(mask)
+            mask = Lambda(k.squeeze, arguments={'axis': -1})(mask)
             y_true_list.append(sample)
+            masks.append(mask)
 
-        adv = Lambda(lambda args: k.stop_gradient(args[0] - args[1]))([y_true_list[1], y_pred_list[1]])
+        ret = Lambda(k.squeeze, arguments={'axis': -1})(y_true_list[0])
+        val = Lambda(k.squeeze, arguments={'axis': -1})(y_pred_list[0])
+        adv = Lambda(lambda args: k.stop_gradient(args[0] - args[1]))([ret, val])
         it = Input(shape=(1, ), name='iterations')
 
-        policy_and_args = y_pred_list[:1] + y_pred_list[2:15]
-        pi_samples = y_true_list[:1] + y_true_list[2:]
+        policy_and_args = y_pred_list[1:15]
+        pi_samples = y_true_list[1:15]
         policy_losses = []
         entropies = []
         for y_pred, y_true in zip(policy_and_args, pi_samples):
-            policy_losses.append(Lambda(self.policy_gradient_loss)([y_true, y_pred]))
-            entropies.append(Lambda(self.entropy)(y_pred))
+            policy_losses.append(Lambda(policy_gradient_loss)([y_true, y_pred]))
+            entropies.append(Lambda(entropy)(y_pred))
 
+        policy_losses = [policy_losses[0]] + [Lambda(lambda args: args[0]*args[1])([p_l, mask])
+                                              for p_l, mask in zip(policy_losses[1:], masks)]
         policy_loss = Lambda(k.stack, arguments={'axis': -1})(policy_losses)
         policy_loss = Lambda(k.sum, arguments={'axis': -1})(policy_loss)
-        adv = Lambda(k.squeeze, arguments={'axis': -1})(adv)
         policy_loss = Lambda(lambda args: -k.mean(args[0]*args[1]), name='policy_loss')([adv, policy_loss])
 
-        value_loss = Lambda(lambda args: k.square(args[0]-args[1]) / 2., name='mse')([y_true_list[1], y_pred_list[1]])
-        value_loss = Lambda(k.mean, name='value_loss')(value_loss)
+        value_l = Lambda(lambda args: k.square(args[0]-args[1]) / 2., name='mse')([ret, val])
+        value_l = Lambda(k.mean, name='value_loss')(value_l)
 
-        entropy = Lambda(k.stack, arguments={'axis': -1})(entropies)
-        entropy = Lambda(k.sum, arguments={'axis': -1})(entropy)
-        entropy = Lambda(lambda x: k.mean(x), name='entropy')(entropy)
+        entrop = Lambda(k.stack, arguments={'axis': -1})(entropies)
+        entrop = Lambda(k.sum, arguments={'axis': -1})(entrop)
+        entrop = Lambda(lambda x: k.mean(x), name='entropy')(entrop)
 
-        entropy_coeff = self.entropy_coeff
-        entropy_coeff *= (1. / (1. + 0.99 * it[0, 0]))
+        entropy_coeff = Lambda(lambda _x:
+                               self.entropy_coeff * (1. / (1. + self.decay *
+                                                           k.stop_gradient(k.squeeze(k.squeeze(k.slice(_x, [0, 0],
+                                                                                                       [1, 1]),
+                                                                                               axis=-1),
+                                                                                     axis=-1)))))(it)
 
-        loss = Lambda(lambda args: args[0] + self.value_loss_coeff * args[1] - entropy_coeff * args[2])([policy_loss,
-                                                                                                         value_loss,
-                                                                                                         entropy])
+        loss = Lambda(lambda args: args[0] + self.value_loss_coeff * args[1] - args[3] * args[2])([policy_loss,
+                                                                                                   value_l,
+                                                                                                   entrop,
+                                                                                                   entropy_coeff])
 
-        self.trainable_model = Model(inputs=self.model.input + y_true_list + [it],
-                                     outputs=[loss])
-        self.trainable_model.compile(optimizer=opt, loss=lambda yt, yp: yp) #,
-                                     #loss_weights=[1., self.value_loss_coeff, entropy_coeff])
+        self.trainable_model = Model(inputs=self.model.input + y_true_list + input_masks + [it], outputs=[loss])
+        self.trainable_model.compile(optimizer=opt, loss=lambda yt, yp: yp)
 
     # pickle or json?
     def save(self, name, num_iters):
         # TODO : fix save model to json
-        #model_json = self.model.to_yaml()
-        #name = os.path.join(name, "model")
-        #with open("{}.yaml".format(name), "w") as json_file:
-        #    json_file.write(model_json)
         os.makedirs(name, exist_ok=True)
         name = os.path.join(name, "weights")
         self.model.save_weights("{}_{}.h5".format(name, num_iters))
+        #name = os.path.join(name, "model")
+        #self.model.save("{}_{}.h5".format(name, num_iters))
 
     def load(self, name, num_iters=0):
         # TODO : load model from json when save fixed
-        # with open("bin/{}.json".format(name), "r") as json_file:
-        #    loaded_model_json = json_file.read()
-        # self.model = model_from_json(loaded_model_json)
         name = os.path.join(name, "weights")
         if num_iters is not 0:
             self.model.load_weights("{}_{}.h5".format(name, num_iters))
         else:
             self.model.load_weights("{}.h5".format(name))
+        #name = os.path.join(name, "model")
+        #if num_iters is not 0:
+        #    self.model = load_model("{}_{}.h5".format(name, num_iters))
+        #else:
+        #    self.model = load_model("{}.h5".format(name))
 
-    def policy_gradient_loss(self, args):
-        y_true, y_pred = args
-        #adv = k.squeeze(advantage, axis=-1)
 
-        policy_loss = sparse_categorical_crossentropy(y_true, y_pred)  # self.compute_log_prob(y_true, y_pred)
+def policy_gradient_loss(args):
+    y_true, y_pred = args
+    y_true = K.cast(y_true, dtype='int32')
+    policy_loss = k.log(k.clip(tf.gather_nd(y_pred, y_true), 1e-12, 1.0))
 
-        return policy_loss
+    return policy_loss
 
-    def entropy(self, y_pred):
-        # entropy = categorical_crossentropy(y_pred, y_pred)
-        entropy = -k.sum(y_pred * k.log(k.clip(y_pred, 1e-12, 1.0)), axis=-1)
 
-        return entropy
+def entropy(y_pred):
+    entropy = -k.sum(y_pred * k.log(k.clip(y_pred, 1e-12, 1.0)), axis=-1)
 
-    def value_loss(self, args):
-        y_true, y_pred = args
-        return mse(y_pred, y_true) / 2.
+    return entropy
 
-    def compute_log_prob(self, y_true, y_pred):
-        return k.sum(y_true * k.log(k.clip(y_pred, 1e-12, 1.0)), axis=-1)
 
-    def dummy_loss_function(self, y_true, y_pred):
-        return k.zeros_like(y_true)
+def value_loss(args):
+    y_true, y_pred = args
+    return mse(y_pred, y_true) / 2.
 
-    def normalization(self, x):
-        return x / k.clip(k.sum(x, axis=-1, keepdims=True), 1e-12, 1.0)
+
+def compute_log_prob(y_true, y_pred):
+    return k.log(k.clip(k.sum(y_true * y_pred, axis=-1), 1e-12, 1.0))  # be careful of masked actions here
+
+
+def dummy_loss_function(y_true, y_pred):
+    return k.zeros_like(y_true)
+
+
+def normalization(x):
+    return x / k.clip(k.sum(x, axis=-1, keepdims=True), 1e-12, 1.0)
 
 
 def test_difference(old_w, new_w):

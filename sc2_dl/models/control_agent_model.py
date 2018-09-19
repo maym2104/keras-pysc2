@@ -1,20 +1,14 @@
-from keras.layers import *
-from keras.optimizers import RMSprop, Adam
-from keras.utils import plot_model
-
 from sc2_dl.models.base_model import *
 
 
-class LSTMModel(BaseModel):
-    def __init__(self, summary_writer=tf.summary.FileWriter('./train'), seq_length=16, start_point=0, seed=123456,
-                 value_loss_coeff=0.1, entropy_coeff=1e-1, batch_size=32, learning_rate=1e-4,
-                 data_format='channels_first'):
+class ControlAgentModel(BaseModel):
+    def __init__(self, seq_length=16, **kwargs):
 
-        super(LSTMModel, self).__init__(summary_writer, start_point, seed, value_loss_coeff, entropy_coeff, batch_size, learning_rate, data_format)
+        super(ControlAgentModel, self).__init__(**kwargs)
 
-        self.seq_length = None  # seq_length
+        self.seq_length = None
 
-    def init_model(self, input_shape, num_actions, opt=Adam(lr=1e-4), graph_path=None):
+    def init_model(self, input_shape, num_actions, opt, graph_path=None):
         # minimap layers
         minimap_shape = input_shape['feature_minimap']
         minimap_shape = (self.batch_size, self.seq_length,) + minimap_shape[1:] + (minimap_shape[0] + 1,)
@@ -31,26 +25,28 @@ class LSTMModel(BaseModel):
         screen_layers_encoded = screen_model(screen_layers)
 
         # non-spatial layers
-        size2d = (8, 8)
+        size2d = k.int_shape(screen_layers_encoded)
         nonspatial_model = Sequential(name='non_spatial_model')
-        nonspatial_shape = (self.batch_size, self.seq_length, len(FLAT_FEATURES) + 2*num_actions + sum([t.sizes[0]
-                                                                                     for t in FLAT_ACTION_TYPES]))
+        nonspatial_shape = (self.batch_size, self.seq_length, len(FLAT_FEATURES)) #+ 2*num_actions + sum([t.sizes[0]
+                                                                                     #for t in FLAT_ACTION_TYPES]))
         nonspatial_model.add(TimeDistributed(self.preprocess_nonspatial_obs(FLAT_FEATURES, nonspatial_shape[2:]),
                                                     name='preprocess_non_spatial_td', batch_input_shape=nonspatial_shape))
-        nonspatial_model.add(TimeDistributed(self.two_layer_mlp(128, 64, input_shape=(140,)),
+        nonspatial_model.add(TimeDistributed(self.two_layer_mlp(128, 64,
+                                                                input_shape=k.int_shape(nonspatial_model.output[1:])),
                                              name='non_spatial_mlp_td'))  # without batch size
 
         nonspatial_layers = Input(batch_shape=(self.batch_size, self.seq_length, len(FLAT_FEATURES)),
                                   name='non_spatial')
-        non_spatial_last_actions = Input(batch_shape=(self.batch_size, self.seq_length,
-                                                num_actions + sum([t.sizes[0] for t in FLAT_ACTION_TYPES])),
-                                         name='non_spatial_last_acts')
+        #non_spatial_last_actions = Input(batch_shape=(self.batch_size, self.seq_length,
+        #                                        num_actions + sum([t.sizes[0] for t in FLAT_ACTION_TYPES])),
+        #                                 name='non_spatial_last_acts')
         available_actions = Input(batch_shape=(self.batch_size, self.seq_length, num_actions,), name='avail_acts')
 
-        all_nonspatial_layers = Concatenate(axis=-1, name='non_spatial_concat')([nonspatial_layers,
-                                                                                 available_actions,
-                                                                                 non_spatial_last_actions])
-        nonspatial_layers_encoded = nonspatial_model(all_nonspatial_layers)
+        #all_nonspatial_layers = Concatenate(axis=-1, name='non_spatial_concat')([nonspatial_layers,
+        #                                                                         available_actions,
+        #                                                                         non_spatial_last_actions])
+        #nonspatial_layers_encoded = nonspatial_model(all_nonspatial_layers)
+        nonspatial_layers_encoded = nonspatial_model(nonspatial_layers)
 
         # state_representation
         state_representation = Concatenate(axis=self.channel_axis, name='concat',
@@ -61,11 +57,9 @@ class LSTMModel(BaseModel):
                                      batch_size=self.batch_size, data_format=self.data_format, return_state=True)
         lstm_state_representation, *lstm_state = self.lstm_layer(state_representation)
 
-        spatial_state_representation = TimeDistributed(Conv2D(32, (3,3), padding='same', data_format=self.data_format,
+        spatial_state_representation = TimeDistributed(Conv2D(32, (3, 3), padding='same', data_format=self.data_format,
                                                               activation='relu'))(lstm_state_representation)
-        post_lstm_conv_shape = [8, 8, 8]
-        post_lstm_conv_shape[self.channel_axis] = 32
-        post_lstm_conv_shape = tuple(post_lstm_conv_shape)
+        post_lstm_conv_shape = k.int_shape(spatial_state_representation)[1:]
         spatial_state_representation = TimeDistributed(self.residual_block(input_shape=post_lstm_conv_shape,
                                                                            num_layers=2))(spatial_state_representation)
         spatial_state_representation = TimeDistributed(self.residual_block(input_shape=post_lstm_conv_shape,
@@ -78,7 +72,7 @@ class LSTMModel(BaseModel):
         fc_state_representation = TimeDistributed(Flatten(data_format=self.data_format,
                                                           name='state_representation_flat'),
                                                   name='state_representation_flat_td')(lstm_state_representation)
-        fc_state_representation = TimeDistributed(self.two_layer_mlp(512, 512, input_shape=(96*8*8, )),
+        fc_state_representation = TimeDistributed(self.two_layer_mlp(512, 512, input_shape=k.int_shape(fc_state_representation)[1:]),
                                                   name='conv_to_fc_td')(fc_state_representation)
         shared_features = Concatenate(name='concat_shared_features')([fc_state_representation,
                                                                       nonspatial_layers_encoded])
@@ -96,42 +90,41 @@ class LSTMModel(BaseModel):
                                                              data_format=self.data_format))(deconv_state_representation)
 
         # output
-        pi_logits = TimeDistributed(self.two_layer_mlp(256, num_actions, input_shape=(512+64, )),
+        pi_logits = TimeDistributed(self.two_layer_mlp(256, num_actions, input_shape=k.int_shape(shared_features)[1:]),
                                     name='pi_logits_td')(shared_features)
         pi = TimeDistributed(Activation('softmax', name='pi_softmax'), name='pi_softmax_td')(pi_logits)
         pi_masked = Multiply(name='pi_masked')([pi, available_actions])
-        pi_normalized = TimeDistributed(Lambda(lambda x: self.normalization(x), name='pi'),
+        pi_normalized = TimeDistributed(Lambda(lambda x: normalization(x), name='pi'),
                                         name='pi_td')(pi_masked)
 
-        v = TimeDistributed(self.two_layer_mlp(256, 1, input_shape=(512, )), name='v')(fc_state_representation)
+        v = TimeDistributed(self.two_layer_mlp(256, 1, input_shape=k.int_shape(fc_state_representation)[1:]),
+                            name='v')(fc_state_representation)
         # TODO: find a better solution to this
         pi_embedded = TimeDistributed(Dense(16, activation='relu', name='pi_embedded'),
                                       name='pi_embedded_td')(pi_logits)
-        pi_sample = TimeDistributed(Lambda(lambda x: k.argmax(k.log(k.random_uniform((self.batch_size, num_actions), seed=self.seed)) / x),
+        pi_sample = TimeDistributed(Lambda(lambda x: k.argmax(k.log(k.random_uniform((self.batch_size, num_actions))) / x),
                                            name='pi_sample'), name='pi_sample_td')(pi_normalized)
 
-        #spatial_input_shape = [32, 32, 32]
-        #spatial_input_shape[self.channel_axis] = 32
         args_non_spatial_input = Concatenate(name='non_spatial_conditionning')([pi_embedded, shared_features])
-        broadcast_pi_embed = TimeDistributed(self.broadcast_along_channels(input_shape=(16,),
+        broadcast_pi_embed = TimeDistributed(self.broadcast_along_channels(input_shape=k.int_shape(pi_embedded)[1:],
                                                                            size2d=(32, 32)))(pi_embedded)
         args_spatial_input = Concatenate(name='spatial_conditionning',
                                          axis=self.channel_axis)([deconv_state_representation, broadcast_pi_embed])
-        args_model = self.args_output(pi_input_shape=(512+16+64,), spatial_input_shape=(32, 32, 32))
-        args = args_model([args_non_spatial_input, args_spatial_input])  # []
-        samples = []
-        flatten_size = 32 * 32
+        args_model = self.args_output(pi_input_shape=k.int_shape(args_non_spatial_input)[1:],
+                                      spatial_input_shape=k.int_shape(args_spatial_input)[1:])
+        args = args_model([args_non_spatial_input, args_spatial_input])
+        samples = [pi_sample]
 
         for arg_type in actions.TYPES:
-            size = flatten_size if arg_type in [actions.TYPES.minimap, actions.TYPES.screen, actions.TYPES.screen2] else arg_type.sizes[0]
+            size = k.int_shape(args[arg_type.id])[1:]
             samples.append(
                 Lambda(lambda x: k.argmax(k.log(k.random_uniform((self.batch_size, 1, size), seed=self.seed)) / x,
                                           axis=-1), name=arg_type.name + '_sample')(args[arg_type.id]))
 
-        inputs = [screen_layers, minimap_layers, nonspatial_layers, non_spatial_last_actions, available_actions]
+        inputs = [screen_layers, minimap_layers, nonspatial_layers, available_actions]
 
-        self.model = Model(inputs=inputs, outputs=[pi_normalized, v]+args)
-        self.target_model = Model(inputs=inputs, outputs=[pi_sample, v]+samples+lstm_state)
+        self.model = Model(inputs=inputs, outputs=[v, pi_normalized]+args)
+        self.target_model = Model(inputs=inputs, outputs=[v]+samples+lstm_state)
 
         self.compile(opt)
 
@@ -159,7 +152,7 @@ class LSTMModel(BaseModel):
         for arg_type in actions.TYPES:
             if arg_type in [actions.TYPES.minimap, actions.TYPES.screen, actions.TYPES.screen2]:
                 arg = TimeDistributed(spatial_case(arg_type), name=arg_type.name + '_td')(spatial_representation)
-            else:  # if arg_type in [actions.TYPES.queued, actions.TYPES.control_group_id]:
+            else:
                 arg = TimeDistributed(Dense(arg_type.sizes[0], activation='softmax', name=arg_type.name),
                                       name=arg_type.name + '_name')(pi_embed)
             args.append(arg)
@@ -179,16 +172,13 @@ class LSTMModel(BaseModel):
     # param returns: nstep sum of rewards + value obtained from taking actions according to policy, according to observations
     # param advantages: returns - values
     # param actions: actions sampled from network policy
-    def train_reinforcement(self, observations, actions, returns, advantages,
+    def train_reinforcement(self, observations, actions, returns, advantages, masks,
                             write_summary=False, step=None, rewards=None, reset_states=False, states=None):
-        sampled_actions = actions[0]
-
-        labels = [sampled_actions, returns] + actions[1:]  # self.args_mask(actions[1:], action_ids)
+        labels = [returns] + actions  # self.args_mask(actions[1:], action_ids)
         self.reset_states(states)  # it's the same states for both models... let's reset them
-        #loss = self.trainable_model.train_on_batch(observations + [advantages, np.array([[[step]]*advantages.shape[1]]*self.batch_size)], labels)
 
         batch_size = returns.shape[0]
-        loss = self.trainable_model.train_on_batch(observations + labels + [np.array([step] * batch_size)],
+        loss = self.trainable_model.train_on_batch(observations + labels + masks + [np.array([step] * batch_size)],
                                                    [np.zeros((batch_size,)) for _ in range(3)])  # dummy targets
 
         # summary
@@ -215,44 +205,66 @@ class LSTMModel(BaseModel):
     def compile(self, opt):
         y_pred_list = self.model.output
         y_true_list = []
-        y_true_list.append(Input(batch_shape=(self.batch_size, self.seq_length, len(actions.FUNCTIONS),),
-                                 name='pi_sampled'))
+        input_masks = []
+        masks = []
         y_true_list.append(Input(batch_shape=(self.batch_size, self.seq_length, 1, ), name='return'))
+        y_true_list.append(Input(batch_shape=(self.batch_size, self.seq_length, 1,), name='pi_sampled'))
 
         for arg_type in actions.TYPES:
             if arg_type in [actions.TYPES.minimap, actions.TYPES.screen, actions.TYPES.screen2]:
-                sample = Input(batch_shape=(self.batch_size, self.seq_length, 32*32, ), name=arg_type.name+'_true')
+                sample = Input(batch_shape=(self.batch_size, self.seq_length, 1, ), name=arg_type.name+'_true')
             else:
-                sample = Input(batch_shape=(self.batch_size, self.seq_length, arg_type.sizes[0],), name=arg_type.name+'_true')
+                sample = Input(batch_shape=(self.batch_size, self.seq_length, 1,), name=arg_type.name+'_true')
 
             y_true_list.append(sample)
+            mask = Input(batch_shape=(self.batch_size, self.seq_length, 1,), name=arg_type.name + '_mask')
+            input_masks.append(mask)
+            mask = Lambda(k.squeeze, arguments={'axis': -1})(mask)
+            y_true_list.append(sample)
+            masks.append(mask)
 
-        adv = Lambda(lambda args: k.stop_gradient(args[0] - args[1]))([y_true_list[1], y_pred_list[1]])
-        it = Input(batch_shape=(self.batch_size, 1, ), name='iterations')
+        ret = Lambda(k.squeeze, arguments={'axis': -1})(y_true_list[0])
+        val = Lambda(k.squeeze, arguments={'axis': -1})(y_pred_list[0])
+        adv = Lambda(lambda args: k.stop_gradient(args[0] - args[1]))([ret, val])
+        it = Input(shape=(self.batch_size, 1, ), name='iterations')
 
-        policy_and_args = y_pred_list[:1] + y_pred_list[2:15]
-        pi_samples = y_true_list[:1] + y_true_list[2:]
+        policy_and_args = y_pred_list[1:15]
+        pi_samples = y_true_list[1:15]
         policy_losses = []
         entropies = []
         for y_pred, y_true in zip(policy_and_args, pi_samples):
-            policy_losses.append(Lambda(self.policy_gradient_loss)([adv, y_pred, y_true]))
-            entropies.append(Lambda(self.entropy)(y_pred))
+            policy_losses.append(Lambda(policy_gradient_loss)([y_pred, y_true]))
+            entropies.append(Lambda(entropy)(y_pred))
 
+        policy_losses = [policy_losses[0]] + [Lambda(lambda args: args[0] * args[1])([p_l, mask])
+                                              for p_l, mask in zip(policy_losses[1:], masks)]
         policy_loss = Lambda(k.stack, arguments={'axis': -1})(policy_losses)
         policy_loss = Lambda(k.sum, arguments={'axis': -1})(policy_loss)
-        policy_loss = Lambda(k.mean, name='policy_loss')(policy_loss)
+        policy_loss = Lambda(lambda args: -k.mean(args[0] * args[1]), name='policy_loss')([adv, policy_loss])
 
-        value_loss = Lambda(self.value_loss, name='mse')([y_true_list[1], y_pred_list[1]])
-        value_loss = Lambda(k.mean, name='value_loss')(value_loss)
+        value_l = Lambda(lambda args: k.square(args[0] - args[1]) / 2., name='mse')([ret, val])
+        value_l = Lambda(k.mean, name='value_loss')(value_l)
 
-        entropy = Lambda(k.stack, arguments={'axis': -1})(entropies)
-        entropy = Lambda(k.sum, arguments={'axis': -1})(entropy)
-        entropy = Lambda(lambda x: -k.mean(x), name='entropy')(entropy)
+        entrop = Lambda(k.stack, arguments={'axis': -1})(entropies)
+        entrop = Lambda(k.sum, arguments={'axis': -1})(entrop)
+        entrop = Lambda(lambda x: -k.mean(x), name='entropy')(entrop)
 
         entropy_coeff = self.entropy_coeff
-        entropy_coeff *= (1. / (1. + 0.99 * it[0, 0]))
+        entropy_coeff *= (1. / (1. + self.decay * k.stop_gradient(k.squeeze(k.squeeze(k.slice(it, [0, 0], [1, 1]),
+                                                                                      axis=-1), axis=-1))))
 
-        self.trainable_model = Model(inputs=self.model.input + y_true_list + [it],
-                                     outputs=[policy_loss, value_loss, entropy])
+        self.trainable_model = Model(inputs=self.model.input + y_true_list + input_masks + [it],
+                                     outputs=[policy_loss, value_l, entrop])
         self.trainable_model.compile(optimizer=opt, loss=lambda yt, yp: yp,
                                      loss_weights=[1., self.value_loss_coeff, entropy_coeff])
+
+
+def policy_gradient_loss(args):
+    adv, y_true, y_pred = args
+    #adv = k.squeeze(advantage, axis=-1)
+    # y_true = K.cast(y_true, dtype='int32')
+    # policy_loss = k.log(k.clip(tf.gather_nd(y_pred, y_true), 1e-12, 1.0))
+    # sparse_categorical_crossentropy(y_true, y_pred)  # self.compute_log_prob(y_true, y_pred)
+    policy_loss = adv * categorical_crossentropy(y_true, y_pred)
+
+    return policy_loss

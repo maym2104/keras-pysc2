@@ -88,6 +88,7 @@ class A2CRunner:
         dones = np.zeros(shapes, dtype=np.float32)
         all_scores = []
         all_samples = []
+        all_masks = []
 
         obs_raw = self.last_obs
         all_actions = last_action = self.last_action
@@ -96,7 +97,6 @@ class A2CRunner:
         last_state = None
 
         for n in range(self.n_steps):
-            # all_scores = all_outcomes = []
             for t in obs_raw:
                 if t.last():
                     score = t.observation["score_cumulative"][0]
@@ -105,17 +105,19 @@ class A2CRunner:
                     episode_over = True
 
             if self.temporal:
-                pi_samples, value_estimates, *args = self.model.predict(last_obs)
-                last_state = args[13:]
+                value_estimates, *samples = self.model.predict(last_obs)
+                last_state = samples[14:]
+                samples = samples[:14]
             else:
-                pi_samples, value_estimates, *args = self.model.predict([np.squeeze(ob, axis=1) for ob in last_obs])
+                value_estimates, *samples = self.model.predict([np.squeeze(ob, axis=1) for ob in last_obs])
                 last_state = None
-            args = args[:13]
-            last_action = self.transform_actions([pi_samples] + args)
-            all_samples.append([pi_samples] + args)
-            all_actions = [np.concatenate([old_act, new_act], axis=1) for old_act, new_act in zip(all_actions, last_action)]
 
-            actions = self.envs.step_agent(obs_raw, [pi_samples] + args)
+            last_action, mask = self.transform_actions(samples)
+            all_samples.append(samples)
+            all_actions = [np.concatenate([old_act, new_act], axis=1) for old_act, new_act in zip(all_actions, last_action)]
+            all_masks.append(mask)
+
+            actions = actions_to_pysc2((samples[0], samples[1:]), self.envs.observation_space.feature_screen[1:3])
 
             values[n, :] = value_estimates[:, 0]
 
@@ -142,31 +144,38 @@ class A2CRunner:
             predictions = self.model.predict(last_obs)
         else:
             predictions = self.model.predict([np.squeeze(ob, axis=1) for ob in last_obs])
-        next_values = predictions[1][:, 0]
+        next_values = predictions[0][:, 0]
         rewards = rewards[:, :n+1]
         values = values[:, :n+1]
 
         returns, advs = compute_returns_advantages(rewards, dones, values, next_values, self.discount)
 
-        actions = [np.stack(act, axis=1) for act in zip(*all_samples)]  # [l_a[:, 1:] for l_a in all_actions]
+        # TODO manage actions for self.temporal
+        actions = [np.stack(act, axis=1) for act in zip(*all_samples)]
         obs = [ob[:, :n+1] for ob in all_obs]
         returns = np.expand_dims(np.transpose(returns), axis=-1)[:, :n+1, :]
         advs = np.expand_dims(np.transpose(advs)[:, :n+1], axis=-1)
         rewards = np.transpose(rewards)
+        masks = [np.concatenate(m, axis=1) for m in zip(*all_masks)]
 
         if not self.temporal:
             flatten_batch_shape = (self.envs.num_envs * (n+1), )
             actions = [np.reshape(act, flatten_batch_shape+act.shape[2:]) for act in actions]
+            batch_indices = np.array(range(flatten_batch_shape[0]), dtype='int32')
+            actions = [np.stack([batch_indices, act], axis=-1) for act in actions]
             obs = [np.reshape(ob, flatten_batch_shape+ob.shape[2:]) for ob in obs]
+            masks = [np.reshape(mask, flatten_batch_shape + mask.shape[2:]) for mask in masks]
             returns = np.reshape(returns, flatten_batch_shape + returns.shape[2:])
             advs = np.reshape(advs, flatten_batch_shape + advs.shape[2:])
             rewards = np.reshape(rewards, flatten_batch_shape + rewards.shape[2:])
 
         if self.train:
-            loss = self.model.train_reinforcement(obs, actions, returns, advs, write_summary, step, rewards, episode_over, self.state)
+            loss = self.model.train_reinforcement(obs, actions, returns, advs, masks, write_summary, step, rewards,
+                                                  episode_over, self.state)
+            # loss = self.model.train(obs, actions, returns, advs, summary=write_summary)
             self.state = last_state if last_state is not None or episode_over else self.state
 
-            return loss
+            return loss #[1] if loss is not None else None
 
         return None,
 
@@ -203,16 +212,18 @@ class A2CRunner:
         obs_nonspatial = np.array([ob["player"] for ob in obs])
         obs_nonspatial = np.expand_dims(obs_nonspatial, axis=1)
 
-        inputs = [obs_screen, obs_minimap, obs_nonspatial, non_spatial_last_actions, obs_available_actions]
+        inputs = [obs_screen, obs_minimap, obs_nonspatial, obs_available_actions]
 
         return inputs
 
     def transform_actions(self, actions):
         pi, *args = actions
+        # pi, args = actions
         pi_sample = to_categorical(pi, len(FUNCTIONS))
         pi_sample = np.expand_dims(pi_sample, axis=1)
 
         arg_samples = []
+        masks = []
         spatial_types = [ACTION_TYPES.minimap, ACTION_TYPES.screen, ACTION_TYPES.screen2]
         size = self.envs.observation_space.feature_screen
         height, width = size[1:3]
@@ -222,14 +233,14 @@ class A2CRunner:
             arg = args[arg_type.id]
             mask = np.array([arg_type in FUNCTIONS._func_list[int(sampled_action)].args for sampled_action in pi.flatten().tolist()])
             mask = mask.reshape(arg.shape + (1, ))
-            mask = mask.repeat(num_classes, axis=-1)
+            masks.append(mask)
             arg_sample = to_categorical(arg, num_classes) * mask
             arg_sample = np.expand_dims(arg_sample, axis=1)
             arg_samples.append(arg_sample)
 
         new_actions = [pi_sample] + arg_samples
 
-        return new_actions
+        return new_actions, masks
 
 
 def compute_returns_advantages(rewards, dones, values, next_values, discount):
@@ -264,6 +275,48 @@ def compute_returns_advantages(rewards, dones, values, next_values, discount):
 def flatten_first_dims(x):
     new_shape = [x.shape[0] * x.shape[1]] + list(x.shape[2:])
     return x.reshape(*new_shape)
+
+
+def flatten_first_dims_dict(x):
+    return {k: flatten_first_dims(v) for k, v in x.items()}
+
+
+def stack_ndarray_dicts(lst, axis=0):
+    """Concatenate ndarray values from list of dicts
+    along new axis."""
+    res = {}
+    for k in lst[0].keys():
+        res[k] = np.stack([d[k] for d in lst], axis=axis)
+    return res
+
+
+def stack_and_flatten_actions(lst, axis=0):
+    fn_id_list, arg_dict_list = zip(*lst)
+    fn_id = np.stack(fn_id_list, axis=axis)
+    fn_id = flatten_first_dims(fn_id)
+    arg_ids = stack_ndarray_dicts(arg_dict_list, axis=axis)
+    arg_ids = flatten_first_dims_dict(arg_ids)
+    return (fn_id, arg_ids)
+
+
+def actions_to_pysc2(actions, size):
+    """Convert agent action representation to FunctionCall representation."""
+    height, width = size
+    fn_id, arg_ids = actions
+    actions_list = []
+    for n in range(fn_id.shape[0]):
+        a_0 = fn_id[n]
+        a_l = []
+        for arg_type in FUNCTIONS._func_list[a_0].args:
+            arg_id = arg_ids[arg_type.id][n]
+            if arg_type in [ACTION_TYPES.screen, ACTION_TYPES.minimap, ACTION_TYPES.screen2]:
+                arg = [arg_id % width, arg_id // height]
+            else:
+                arg = [arg_id]
+            a_l.append(arg)
+        action = FunctionCall(a_0, a_l)
+        actions_list.append(action)
+    return actions_list
 
 
 def show(args):
