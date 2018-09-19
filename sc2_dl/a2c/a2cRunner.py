@@ -145,8 +145,10 @@ class A2CRunner:
         else:
             predictions = self.model.predict([np.squeeze(ob, axis=1) for ob in last_obs])
         next_values = predictions[0][:, 0]
-        rewards = rewards[:, :n+1]
-        values = values[:, :n+1]
+        rewards = rewards[:n+1]
+        values = values[:n+1]
+        #rewards = rewards[:, :n+1]
+        #values = values[:, :n+1]
 
         returns, advs = compute_returns_advantages(rewards, dones, values, next_values, self.discount)
 
