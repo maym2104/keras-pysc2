@@ -148,22 +148,8 @@ def main():
     decay = args.decay
     if args.adam:
         optimizer = Adam(lr=lr, beta_1=0.9, beta_2=0.999, epsilon=1e-8, clipnorm=args.grad_norm, decay=decay)
-        #optimizer = {'class_name': 'adam',
-        #             'config': {'lr': lr,
-        #                        'beta_1': 0.9,
-        #                        'beta_2': 0.999,
-        #                        'epsilon': 1e-8,
-        #                        'decay': decay,
-        #                        'clipnorm': args.grad_norm}}
-        #optimizer = TFOptimizer(tf.train.AdamOptimizer(learning_rate=lr))
     else:
         #optimizer = TFOptimizer(tf.train.RMSPropOptimizer(learning_rate=lr, decay=0.99, epsilon=1e-5))
-        #optimizer = {'class_name': 'rmsprop',
-        #             'config': {'lr': lr,
-        #                        'rho': 0.99,
-        #                        'epsilon': 1e-5,
-        #                        'decay': decay,
-        #                        'clipnorm': args.grad_norm}}
         optimizer = RMSprop(lr=lr, rho=0.99, epsilon=1e-5, decay=decay, clipnorm=args.grad_norm)
     model.init_model(envs.observation_space, len(envs.action_space.functions), opt=optimizer, graph_path=summary_path)
 
@@ -182,7 +168,7 @@ def main():
                 _save_if_training(model, i)
 
             assert model.model is not None
-            loss = runner.run_batch(write_summary, i)
+            loss, *_ = runner.run_batch(write_summary, i)
             if write_summary:
                 print('iter %d: loss = %f' % (i, loss), flush=True)
                 summary_writer.flush()

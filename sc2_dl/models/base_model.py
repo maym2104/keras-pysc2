@@ -98,31 +98,31 @@ class BaseModel:
     # and log the scalar values to avoid too large values
     def preprocess_spatial_obs(self, feature_types, input_shape, embed_size=10):
         x = Input(batch_shape=(self.batch_size, ) + input_shape)
+        #xs = Lambda(k.slice, arguments={'start': [0, 0, 0, 0], 'size': [-1, -1, -1] + (len(feature_types),)})(x)
         xs = Lambda(lambda _x: _x[:, :, :, :len(feature_types)])(x)
         xs = Lambda(tf.split, arguments={'num_or_size_splits': len(feature_types), 'axis': -1})(xs)
         layers = []
 
         def cat_case(feat_type):
-            m = Sequential(name=s.name + '_preprocess_model')
-            m.add(Lambda(lambda _x: k.one_hot(k.cast(k.squeeze(_x, -1), dtype='int32'), feat_type.scale),
+            _model = Sequential(name=s.name + '_preprocess_model')
+            _model.add(Lambda(lambda _x: k.one_hot(k.cast(k.squeeze(_x, axis=-1), dtype='int32'), feat_type.scale),
                              name='preprocess_'+feat_type.name+'_to_one_hot', input_shape=input_shape[:-1] + (1,),
                              batch_size=self.batch_size))
             if self.data_format == 'channels_first':
-                m.add(Permute((3, 1, 2), name='preprocess_' + feat_type.name + '_to_NCHW'))
-            m.add(Conv2D(embed_size, 1, padding='same', activation='relu',
+                _model.add(Permute((3, 1, 2), name='preprocess_' + feat_type.name + '_to_NCHW'))
+            _model.add(Conv2D(embed_size, 1, padding='same', activation='relu',
                              name='preprocess_'+feat_type.name+'_conv', data_format=self.data_format))
 
-            return m
+            return _model
 
         def scalar_case(feat_type):
-            m = Sequential(name=feat_type.name + '_preprocess_model')
-            m.add(Lambda(lambda _x: k.log(_x + 1.0),
-                         name='preprocess_' + feat_type.name + '_log',
-                         input_shape=input_shape[:-1] + (1,), batch_size=self.batch_size))
+            _model = Sequential(name=feat_type.name + '_preprocess_model')
+            _model.add(Lambda(lambda _x: k.log(_x+1.0), name='preprocess_'+feat_type.name+'_log',
+                             input_shape=input_shape[:-1] + (1,), batch_size=self.batch_size))
             if self.data_format == 'channels_first':
-                m.add(Permute((3, 1, 2), name='preprocess_' + feat_type.name + '_to_NCHW'))
+                _model.add(Permute((3, 1, 2), name='preprocess_' + feat_type.name + '_to_NCHW'))
 
-            return m
+            return _model
 
         for s in feature_types:
             if s.type == features.FeatureType.CATEGORICAL:
@@ -141,7 +141,7 @@ class BaseModel:
         y = Concatenate(axis=self.channel_axis, name='preprocess_spatial_concat')(layers)
 
         model = Model(inputs=[x], outputs=[y], name='preprocess_spatial_model')
-        model.compile(optimizer='sgd', loss='mse')
+        #model.compile(optimizer='sgd', loss='mse')
 
         return model
 
@@ -239,9 +239,9 @@ class BaseModel:
     # param returns: nstep sum of rewards + value obtained from taking actions according to policy, according to observations
     # param advantages: returns - values
     # param actions: actions sampled from network policy
-    def train_reinforcement(self, observations, actions, returns, advantages, masks,
+    def train_reinforcement(self, observations, acts, returns, advantages, masks,
                             write_summary=False, step=None, rewards=None, reset_states=False, states=None):
-        labels = [returns] + actions
+        labels = [returns] + acts
         batch_size = returns.shape[0]
         loss = self.trainable_model.train_on_batch(observations + labels + masks + [np.array([step] * batch_size)],
                                                    [np.zeros((batch_size,))])  # dummy targets
@@ -272,13 +272,13 @@ class BaseModel:
         masks = []
         input_masks = []
         y_true_list.append(Input(shape=(1, ), name='return'))
-        y_true_list.append(Input(shape=(2,), name='pi_sampled', dtype='int32'))
+        y_true_list.append(Input(shape=(1,), name='pi_sampled', dtype='int32'))
 
         for arg_type in actions.TYPES:
             if arg_type in [actions.TYPES.minimap, actions.TYPES.screen, actions.TYPES.screen2]:
-                sample = Input(shape=(2, ), name=arg_type.name+'_true', dtype='int32')
+                sample = Input(shape=(1, ), name=arg_type.name+'_true', dtype='int32')
             else:
-                sample = Input(shape=(2,), name=arg_type.name+'_true', dtype='int32')
+                sample = Input(shape=(1,), name=arg_type.name+'_true', dtype='int32')
 
             mask = Input(shape=(1,), name=arg_type.name+'_mask')
             input_masks.append(mask)
@@ -352,8 +352,11 @@ class BaseModel:
 
 def policy_gradient_loss(args):
     y_true, y_pred = args
-    y_true = K.cast(y_true, dtype='int32')
-    policy_loss = k.log(k.clip(tf.gather_nd(y_pred, y_true), 1e-12, 1.0))
+    #adv = k.squeeze(advantage, axis=-1)
+
+    y_true = k.stack([k.arange(k.shape(y_true)[0]), k.cast(k.squeeze(y_true, axis=-1), dtype='int32')], axis=-1)
+    policy_loss = k.log(k.clip(tf.gather_nd(y_pred, y_true), 1e-12, 1.))
+    #sparse_categorical_crossentropy(y_true, y_pred)  # self.compute_log_prob(y_true, y_pred)
 
     return policy_loss
 

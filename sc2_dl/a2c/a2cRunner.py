@@ -147,8 +147,6 @@ class A2CRunner:
         next_values = predictions[0][:, 0]
         rewards = rewards[:n+1]
         values = values[:n+1]
-        #rewards = rewards[:, :n+1]
-        #values = values[:, :n+1]
 
         returns, advs = compute_returns_advantages(rewards, dones, values, next_values, self.discount)
 
@@ -163,8 +161,8 @@ class A2CRunner:
         if not self.temporal:
             flatten_batch_shape = (self.envs.num_envs * (n+1), )
             actions = [np.reshape(act, flatten_batch_shape+act.shape[2:]) for act in actions]
-            batch_indices = np.array(range(flatten_batch_shape[0]), dtype='int32')
-            actions = [np.stack([batch_indices, act], axis=-1) for act in actions]
+            #batch_indices = np.array(range(flatten_batch_shape[0]), dtype='int32')
+            #actions = [np.stack([batch_indices, act], axis=-1) for act in actions]
             obs = [np.reshape(ob, flatten_batch_shape+ob.shape[2:]) for ob in obs]
             masks = [np.reshape(mask, flatten_batch_shape + mask.shape[2:]) for mask in masks]
             returns = np.reshape(returns, flatten_batch_shape + returns.shape[2:])

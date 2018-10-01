@@ -59,7 +59,7 @@ class ControlAgentModel(BaseModel):
 
         spatial_state_representation = TimeDistributed(Conv2D(32, (3, 3), padding='same', data_format=self.data_format,
                                                               activation='relu'))(lstm_state_representation)
-        post_lstm_conv_shape = k.int_shape(spatial_state_representation)[1:]
+        post_lstm_conv_shape = k.int_shape(spatial_state_representation)[2:]
         spatial_state_representation = TimeDistributed(self.residual_block(input_shape=post_lstm_conv_shape,
                                                                            num_layers=2))(spatial_state_representation)
         spatial_state_representation = TimeDistributed(self.residual_block(input_shape=post_lstm_conv_shape,
@@ -106,19 +106,19 @@ class ControlAgentModel(BaseModel):
                                            name='pi_sample'), name='pi_sample_td')(pi_normalized)
 
         args_non_spatial_input = Concatenate(name='non_spatial_conditionning')([pi_embedded, shared_features])
-        broadcast_pi_embed = TimeDistributed(self.broadcast_along_channels(input_shape=k.int_shape(pi_embedded)[1:],
+        broadcast_pi_embed = TimeDistributed(self.broadcast_along_channels(input_shape=k.int_shape(pi_embedded)[2:],
                                                                            size2d=(32, 32)))(pi_embedded)
         args_spatial_input = Concatenate(name='spatial_conditionning',
                                          axis=self.channel_axis)([deconv_state_representation, broadcast_pi_embed])
-        args_model = self.args_output(pi_input_shape=k.int_shape(args_non_spatial_input)[1:],
-                                      spatial_input_shape=k.int_shape(args_spatial_input)[1:])
+        args_model = self.args_output(pi_input_shape=k.int_shape(args_non_spatial_input)[2:],
+                                      spatial_input_shape=k.int_shape(args_spatial_input)[2:])
         args = args_model([args_non_spatial_input, args_spatial_input])
         samples = [pi_sample]
 
         for arg_type in actions.TYPES:
-            size = k.int_shape(args[arg_type.id])[1:]
+            size = k.int_shape(args[arg_type.id])[2:]
             samples.append(
-                Lambda(lambda x: k.argmax(k.log(k.random_uniform((self.batch_size, 1, size), seed=self.seed)) / x,
+                Lambda(lambda x: k.argmax(k.log(k.random_uniform((self.batch_size, 1,) + size, seed=self.seed)) / x,
                                           axis=-1), name=arg_type.name + '_sample')(args[arg_type.id]))
 
         inputs = [screen_layers, minimap_layers, nonspatial_layers, available_actions]
@@ -172,9 +172,9 @@ class ControlAgentModel(BaseModel):
     # param returns: nstep sum of rewards + value obtained from taking actions according to policy, according to observations
     # param advantages: returns - values
     # param actions: actions sampled from network policy
-    def train_reinforcement(self, observations, actions, returns, advantages, masks,
+    def train_reinforcement(self, observations, acts, returns, advantages, masks,
                             write_summary=False, step=None, rewards=None, reset_states=False, states=None):
-        labels = [returns] + actions  # self.args_mask(actions[1:], action_ids)
+        labels = [returns] + acts  # self.args_mask(actions[1:], action_ids)
         self.reset_states(states)  # it's the same states for both models... let's reset them
 
         batch_size = returns.shape[0]
@@ -206,38 +206,42 @@ class ControlAgentModel(BaseModel):
         y_pred_list = self.model.output
         y_true_list = []
         input_masks = []
-        masks = []
+        #masks = []
         y_true_list.append(Input(batch_shape=(self.batch_size, self.seq_length, 1, ), name='return'))
-        y_true_list.append(Input(batch_shape=(self.batch_size, self.seq_length, 1,), name='pi_sampled'))
+        y_true_list.append(Input(batch_shape=(self.batch_size, self.seq_length,), name='pi_sampled'), dtype='int32')
 
         for arg_type in actions.TYPES:
             if arg_type in [actions.TYPES.minimap, actions.TYPES.screen, actions.TYPES.screen2]:
-                sample = Input(batch_shape=(self.batch_size, self.seq_length, 1, ), name=arg_type.name+'_true')
+                sample = Input(batch_shape=(self.batch_size, self.seq_length,), name=arg_type.name+'_true', dtype='int32')
             else:
-                sample = Input(batch_shape=(self.batch_size, self.seq_length, 1,), name=arg_type.name+'_true')
+                sample = Input(batch_shape=(self.batch_size, self.seq_length,), name=arg_type.name+'_true', dtype='int32')
 
             y_true_list.append(sample)
-            mask = Input(batch_shape=(self.batch_size, self.seq_length, 1,), name=arg_type.name + '_mask')
+            mask = Input(batch_shape=(self.batch_size, self.seq_length,), name=arg_type.name + '_mask')
             input_masks.append(mask)
-            mask = Lambda(k.squeeze, arguments={'axis': -1})(mask)
-            y_true_list.append(sample)
-            masks.append(mask)
+            #mask = Lambda(k.squeeze, arguments={'axis': -1})(mask)
+            #y_true_list.append(sample)
+            #masks.append(mask)
 
         ret = Lambda(k.squeeze, arguments={'axis': -1})(y_true_list[0])
         val = Lambda(k.squeeze, arguments={'axis': -1})(y_pred_list[0])
         adv = Lambda(lambda args: k.stop_gradient(args[0] - args[1]))([ret, val])
-        it = Input(shape=(self.batch_size, 1, ), name='iterations')
+        it = Input(batch_shape=(self.batch_size, 1, ), name='iterations')
 
         policy_and_args = y_pred_list[1:15]
         pi_samples = y_true_list[1:15]
         policy_losses = []
         entropies = []
         for y_pred, y_true in zip(policy_and_args, pi_samples):
-            policy_losses.append(Lambda(policy_gradient_loss)([y_pred, y_true]))
+            y_true = Lambda(k.reshape, arguments={'shape': [-1, 1]})(y_true)
+            y_pred = Lambda(k.reshape, arguments={'shape': [k.shape(y_true)[0], -1]})(y_pred)
+            policy_loss = Lambda(policy_gradient_loss)([y_true, y_pred])
+            policy_loss = Lambda(k.reshape, arguments={'shape': [self.batch_size, -1]})(policy_loss)
+            policy_losses.append(policy_loss)
             entropies.append(Lambda(entropy)(y_pred))
 
         policy_losses = [policy_losses[0]] + [Lambda(lambda args: args[0] * args[1])([p_l, mask])
-                                              for p_l, mask in zip(policy_losses[1:], masks)]
+                                              for p_l, mask in zip(policy_losses[1:], input_masks)]
         policy_loss = Lambda(k.stack, arguments={'axis': -1})(policy_losses)
         policy_loss = Lambda(k.sum, arguments={'axis': -1})(policy_loss)
         policy_loss = Lambda(lambda args: -k.mean(args[0] * args[1]), name='policy_loss')([adv, policy_loss])
@@ -249,9 +253,12 @@ class ControlAgentModel(BaseModel):
         entrop = Lambda(k.sum, arguments={'axis': -1})(entrop)
         entrop = Lambda(lambda x: -k.mean(x), name='entropy')(entrop)
 
-        entropy_coeff = self.entropy_coeff
-        entropy_coeff *= (1. / (1. + self.decay * k.stop_gradient(k.squeeze(k.squeeze(k.slice(it, [0, 0], [1, 1]),
-                                                                                      axis=-1), axis=-1))))
+        entropy_coeff = Lambda(lambda _x:
+                               self.entropy_coeff * (1. / (1. + self.decay *
+                                                           k.stop_gradient(k.squeeze(k.squeeze(k.slice(_x, [0, 0],
+                                                                                                       [1, 1]),
+                                                                                               axis=-1),
+                                                                                     axis=-1)))))(it)
 
         self.trainable_model = Model(inputs=self.model.input + y_true_list + input_masks + [it],
                                      outputs=[policy_loss, value_l, entrop])
@@ -259,12 +266,12 @@ class ControlAgentModel(BaseModel):
                                      loss_weights=[1., self.value_loss_coeff, entropy_coeff])
 
 
-def policy_gradient_loss(args):
-    adv, y_true, y_pred = args
+#def policy_gradient_loss(args):
+#    adv, y_true, y_pred = args
     #adv = k.squeeze(advantage, axis=-1)
     # y_true = K.cast(y_true, dtype='int32')
     # policy_loss = k.log(k.clip(tf.gather_nd(y_pred, y_true), 1e-12, 1.0))
     # sparse_categorical_crossentropy(y_true, y_pred)  # self.compute_log_prob(y_true, y_pred)
-    policy_loss = adv * categorical_crossentropy(y_true, y_pred)
+#    policy_loss = adv * categorical_crossentropy(y_true, y_pred)
 
-    return policy_loss
+#    return policy_loss
