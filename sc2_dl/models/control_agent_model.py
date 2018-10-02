@@ -208,7 +208,7 @@ class ControlAgentModel(BaseModel):
         input_masks = []
         #masks = []
         y_true_list.append(Input(batch_shape=(self.batch_size, self.seq_length, 1, ), name='return'))
-        y_true_list.append(Input(batch_shape=(self.batch_size, self.seq_length,), name='pi_sampled'), dtype='int32')
+        y_true_list.append(Input(batch_shape=(self.batch_size, self.seq_length,), name='pi_sampled', dtype='int32'))
 
         for arg_type in actions.TYPES:
             if arg_type in [actions.TYPES.minimap, actions.TYPES.screen, actions.TYPES.screen2]:
