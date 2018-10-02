@@ -168,7 +168,7 @@ def main():
                 _save_if_training(model, i)
 
             assert model.model is not None
-            loss, *_ = runner.run_batch(write_summary, i)
+            loss = runner.run_batch(write_summary, i)
             if write_summary:
                 print('iter %d: loss = %f' % (i, loss), flush=True)
                 summary_writer.flush()

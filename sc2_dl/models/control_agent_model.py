@@ -179,7 +179,7 @@ class ControlAgentModel(BaseModel):
 
         batch_size = returns.shape[0]
         loss = self.trainable_model.train_on_batch(observations + labels + masks + [np.array([step] * batch_size)],
-                                                   [np.zeros((batch_size,)) for _ in range(3)])  # dummy targets
+                                                   [np.zeros((batch_size,))])  # dummy targets
 
         # summary
         if write_summary:
@@ -190,9 +190,9 @@ class ControlAgentModel(BaseModel):
             self.writer.add_summary(return_summary, global_step=step)
             self.writer.add_summary(reward_summary, global_step=step)
             self.writer.add_summary(adv_summary, global_step=step)
-            for name, value in zip(self.trainable_model.metrics_names, loss):
-                summary = tf.Summary(value=[tf.Summary.Value(tag=name, simple_value=value), ])
-                self.writer.add_summary(summary, global_step=step)
+            #for name, value in zip(self.trainable_model.metrics_names, loss):
+            summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=loss), ])
+            self.writer.add_summary(summary, global_step=step)
 
         return loss
 
@@ -251,7 +251,7 @@ class ControlAgentModel(BaseModel):
 
         entrop = Lambda(k.stack, arguments={'axis': -1})(entropies)
         entrop = Lambda(k.sum, arguments={'axis': -1})(entrop)
-        entrop = Lambda(lambda x: -k.mean(x), name='entropy')(entrop)
+        entrop = Lambda(lambda x: k.mean(x), name='entropy')(entrop)
 
         entropy_coeff = Lambda(lambda _x:
                                self.entropy_coeff * (1. / (1. + self.decay *
@@ -260,10 +260,15 @@ class ControlAgentModel(BaseModel):
                                                                                                axis=-1),
                                                                                      axis=-1)))))(it)
 
+        loss = Lambda(lambda args: args[0] + self.value_loss_coeff * args[1] - args[3] * args[2])([policy_loss,
+                                                                                                   value_l,
+                                                                                                   entrop,
+                                                                                                   entropy_coeff])
+
         self.trainable_model = Model(inputs=self.model.input + y_true_list + input_masks + [it],
-                                     outputs=[policy_loss, value_l, entrop])
-        self.trainable_model.compile(optimizer=opt, loss=lambda yt, yp: yp,
-                                     loss_weights=[1., self.value_loss_coeff, entropy_coeff])
+                                     outputs=[loss])
+        self.trainable_model.compile(optimizer=opt, loss=lambda yt, yp: yp)  # ,
+                                     # loss_weights=[1., self.value_loss_coeff, entropy_coeff])
 
 
 #def policy_gradient_loss(args):
