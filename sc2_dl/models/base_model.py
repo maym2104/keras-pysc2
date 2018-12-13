@@ -96,31 +96,32 @@ class BaseModel:
 
     # This method transforms the categorical features in one-hot tensors on the channel dim
     # and log the scalar values to avoid too large values
-    def preprocess_spatial_obs(self, feature_types, input_shape, embed_size=10):
-        x = Input(batch_shape=(self.batch_size, ) + input_shape)
+    def preprocess_spatial_obs(self, feature_types, input_shape, prefix, embed_size=10):
+        x = Input(batch_shape=(self.batch_size, ) + input_shape, name=prefix + '_input')
         #xs = Lambda(k.slice, arguments={'start': [0, 0, 0, 0], 'size': [-1, -1, -1] + (len(feature_types),)})(x)
-        xs = Lambda(lambda _x: _x[:, :, :, :len(feature_types)])(x)
-        xs = Lambda(tf.split, arguments={'num_or_size_splits': len(feature_types), 'axis': -1})(xs)
+        xs = Lambda(lambda _x: _x[:, :, :, :len(feature_types)], name=prefix + '_slice')(x)
+        xs = Lambda(tf.split, arguments={'num_or_size_splits': len(feature_types), 'axis': -1}, name=prefix + '_split')(xs)
+        #xs = Lambda(tf.split, arguments={'num_or_size_splits': input_shape[-1], 'axis': -1})(x)
         layers = []
 
         def cat_case(feat_type):
-            _model = Sequential(name=s.name + '_preprocess_model')
+            _model = Sequential(name=prefix + feat_type.name + '_preprocess_model')
             _model.add(Lambda(lambda _x: k.one_hot(k.cast(k.squeeze(_x, axis=-1), dtype='int32'), feat_type.scale),
-                             name='preprocess_'+feat_type.name+'_to_one_hot', input_shape=input_shape[:-1] + (1,),
+                             name=prefix + '_preprocess_'+feat_type.name+'_to_one_hot', input_shape=input_shape[:-1] + (1,),
                              batch_size=self.batch_size))
             if self.data_format == 'channels_first':
-                _model.add(Permute((3, 1, 2), name='preprocess_' + feat_type.name + '_to_NCHW'))
+                _model.add(Permute((3, 1, 2), name=prefix + '_preprocess_' + feat_type.name + '_to_NCHW'))
             _model.add(Conv2D(embed_size, 1, padding='same', activation='relu',
-                             name='preprocess_'+feat_type.name+'_conv', data_format=self.data_format))
+                             name=prefix + '_preprocess_'+feat_type.name+'_conv', data_format=self.data_format))
 
             return _model
 
         def scalar_case(feat_type):
-            _model = Sequential(name=feat_type.name + '_preprocess_model')
-            _model.add(Lambda(lambda _x: k.log(_x+1.0), name='preprocess_'+feat_type.name+'_log',
+            _model = Sequential(name=prefix + feat_type.name + '_preprocess_model')
+            _model.add(Lambda(lambda _x: k.log(_x+1.0), name=prefix + '_preprocess_'+feat_type.name+'_log',
                              input_shape=input_shape[:-1] + (1,), batch_size=self.batch_size))
             if self.data_format == 'channels_first':
-                _model.add(Permute((3, 1, 2), name='preprocess_' + feat_type.name + '_to_NCHW'))
+                _model.add(Permute((3, 1, 2), name=prefix + '_preprocess_' + feat_type.name + '_to_NCHW'))
 
             return _model
 
@@ -133,14 +134,18 @@ class BaseModel:
                 raise NotImplementedError
             layers.append(layer)
 
-        last_actions = Lambda(lambda _x: _x[:, :, :, len(feature_types):])(x)
+        last_actions = Lambda(lambda _x: _x[:, :, :, len(feature_types):], name=prefix + '_select_last_act')(x)
+        #for i in range(len(feature_types), len(xs)):
+        #    layer = xs[i]
         if self.data_format == 'channels_first':
-            last_actions = Permute((3, 1, 2), name='preprocess_last_acts_to_NCHW')(last_actions)
+            last_actions = Permute((3, 1, 2), name=prefix + '_preprocess_last_act_to_NCHW')(last_actions)
+        last_actions = Conv2D(embed_size, 1, padding='same', activation='relu', name=prefix + '_preprocess_last_act_conv',
+                       data_format=self.data_format)(last_actions)
         layers.append(last_actions)
 
-        y = Concatenate(axis=self.channel_axis, name='preprocess_spatial_concat')(layers)
+        y = Concatenate(axis=self.channel_axis, name=prefix + '_preprocess_spatial_concat')(layers)
 
-        model = Model(inputs=[x], outputs=[y], name='preprocess_spatial_model')
+        model = Model(inputs=[x], outputs=[y], name=prefix + '_preprocess_spatial_model')
         #model.compile(optimizer='sgd', loss='mse')
 
         return model
@@ -214,7 +219,7 @@ class BaseModel:
 
     def first_conv_block(self, prefix, feature_types, input_shape):
         model = Sequential(name=prefix + '_model')
-        model.add(self.preprocess_spatial_obs(feature_types, input_shape))
+        model.add(self.preprocess_spatial_obs(feature_types, input_shape, prefix))
         model.add(ZeroPadding2D(name='1_1_0_padding_'+prefix, data_format=self.data_format))
         model.add(Conv2D(32, (4, 4), strides=2, activation='relu', name='conv1_'+prefix, data_format=self.data_format))
         res_shape = k.int_shape(model.output)[1:]

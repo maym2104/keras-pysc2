@@ -11,7 +11,7 @@ class FullyConvModel(BaseModel):
         minimap_shape = input_shape['feature_minimap']
         minimap_shape = minimap_shape[1:] + (minimap_shape[0] + 1, )
         minimap_model = Sequential(name='minimap_model')
-        minimap_model.add(self.preprocess_spatial_obs(features.MINIMAP_FEATURES, minimap_shape, embed_size=1))
+        minimap_model.add(self.preprocess_spatial_obs(features.MINIMAP_FEATURES, minimap_shape, 'minimap', embed_size=1))
         minimap_model.add(Conv2D(16, (5, 5), padding='same', activation='relu', name='conv1_minimap',
                                  data_format=self.data_format))
         minimap_model.add(Conv2D(32, (3, 3), padding='same', activation='relu', name='conv2_minimap',
@@ -24,7 +24,7 @@ class FullyConvModel(BaseModel):
         screen_shape = input_shape['feature_screen']
         screen_shape = screen_shape[1:] + (screen_shape[0] + 2, )
         screen_model = Sequential(name='screen_model')
-        screen_model.add(self.preprocess_spatial_obs(features.SCREEN_FEATURES, screen_shape, embed_size=1))
+        screen_model.add(self.preprocess_spatial_obs(features.SCREEN_FEATURES, screen_shape, 'screen', embed_size=1))
         screen_model.add(Conv2D(16, (5, 5), padding='same', activation='relu', name='conv1_screen',
                                 data_format=self.data_format))
         screen_model.add(Conv2D(32, (3, 3), padding='same', activation='relu', name='conv2_screen',
