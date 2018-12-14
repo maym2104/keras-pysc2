@@ -148,6 +148,7 @@ def main():
     decay = args.decay
     if args.adam:
         optimizer = Adam(lr=lr, beta_1=0.9, beta_2=0.999, epsilon=1e-8, clipnorm=args.grad_norm, decay=decay)
+        # optimizer = TFOptimizer(tf.train.AdamOptimizer(learning_rate=lr))
     else:
         #optimizer = TFOptimizer(tf.train.RMSPropOptimizer(learning_rate=lr, decay=0.99, epsilon=1e-5))
         optimizer = RMSprop(lr=lr, rho=0.99, epsilon=1e-5, decay=decay, clipnorm=args.grad_norm)
@@ -160,6 +161,7 @@ def main():
     runner.reset()
 
     i = args.start_point
+    i = i if i > 0 else 0   # no way of knowing starting iteration if -1...
     try:
         while True:
             write_summary = args.train and i % args.summary_iters == 0

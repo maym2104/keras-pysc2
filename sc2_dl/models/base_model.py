@@ -344,9 +344,9 @@ class BaseModel:
     def load(self, name, num_iters=0):
         # TODO : load model from json when save fixed
         name = os.path.join(name, "weights")
-        if num_iters is not 0:
+        if num_iters > 0:
             self.model.load_weights("{}_{}.h5".format(name, num_iters))
-        else:
+        elif num_iters < 0:
             self.model.load_weights("{}.h5".format(name))
         #name = os.path.join(name, "model")
         #if num_iters is not 0:
