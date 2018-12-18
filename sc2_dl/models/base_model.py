@@ -99,20 +99,27 @@ class BaseModel:
     def preprocess_spatial_obs(self, feature_types, input_shape, prefix, embed_size=10):
         x = Input(batch_shape=(self.batch_size, ) + input_shape, name=prefix + '_input')
         #xs = Lambda(k.slice, arguments={'start': [0, 0, 0, 0], 'size': [-1, -1, -1] + (len(feature_types),)})(x)
-        xs = Lambda(lambda _x: _x[:, :, :, :len(feature_types)], name=prefix + '_slice')(x)
-        xs = Lambda(tf.split, arguments={'num_or_size_splits': len(feature_types), 'axis': -1}, name=prefix + '_split')(xs)
+        #xs = Lambda(lambda _x: _x[:, :, :, :len(feature_types)], name=prefix + '_slice')(x)
+        #channels last ???
+        xs = Lambda(tf.split, arguments={'num_or_size_splits': input_shape[-1], 'axis': -1}, name=prefix + '_split')(x)
         #xs = Lambda(tf.split, arguments={'num_or_size_splits': input_shape[-1], 'axis': -1})(x)
         layers = []
 
-        def cat_case(feat_type):
-            _model = Sequential(name=prefix + feat_type.name + '_preprocess_model')
-            _model.add(Lambda(lambda _x: k.one_hot(k.cast(k.squeeze(_x, axis=-1), dtype='int32'), feat_type.scale),
-                             name=prefix + '_preprocess_'+feat_type.name+'_to_one_hot', input_shape=input_shape[:-1] + (1,),
+        def cat_case(feat_type=None, name=""):
+            if feat_type is None:
+                scale = 1
+                name = name
+            else:
+                scale = feat_type.scale
+                name = feat_type.name
+            _model = Sequential(name=prefix + name + '_preprocess_model')
+            _model.add(Lambda(lambda _x: k.one_hot(k.cast(k.squeeze(_x, axis=-1), dtype='int32'), scale),
+                             name=prefix + '_preprocess_' + name + '_to_one_hot', input_shape=input_shape[:-1] + (1,),
                              batch_size=self.batch_size))
             if self.data_format == 'channels_first':
-                _model.add(Permute((3, 1, 2), name=prefix + '_preprocess_' + feat_type.name + '_to_NCHW'))
+                _model.add(Permute((3, 1, 2), name=prefix + '_preprocess_' + name + '_to_NCHW'))
             _model.add(Conv2D(embed_size, 1, padding='same', activation='relu',
-                             name=prefix + '_preprocess_'+feat_type.name+'_conv', data_format=self.data_format))
+                             name=prefix + '_preprocess_'+ name +'_conv', data_format=self.data_format))
 
             return _model
 
@@ -134,14 +141,14 @@ class BaseModel:
                 raise NotImplementedError
             layers.append(layer)
 
-        last_actions = Lambda(lambda _x: _x[:, :, :, len(feature_types):], name=prefix + '_select_last_act')(x)
-        #for i in range(len(feature_types), len(xs)):
-        #    layer = xs[i]
-        if self.data_format == 'channels_first':
-            last_actions = Permute((3, 1, 2), name=prefix + '_preprocess_last_act_to_NCHW')(last_actions)
-        last_actions = Conv2D(embed_size, 1, padding='same', activation='relu', name=prefix + '_preprocess_last_act_conv',
-                       data_format=self.data_format)(last_actions)
-        layers.append(last_actions)
+        for i in range(len(feature_types), input_shape[-1]):
+            last_action = cat_case(name="last_action_{}".format(i))(xs[i])
+        #last_actions = Lambda(lambda _x: _x[:, :, :, len(feature_types):], name=prefix + '_select_last_act')(x)
+        #if self.data_format == 'channels_first':
+        #    last_actions = Permute((3, 1, 2), name=prefix + '_preprocess_last_act_to_NCHW')(last_actions)
+        #last_actions = Conv2D(embed_size, 1, padding='same', activation='relu', name=prefix + '_preprocess_last_act_conv',
+        #               data_format=self.data_format)(last_actions)
+            layers.append(last_action)
 
         y = Concatenate(axis=self.channel_axis, name=prefix + '_preprocess_spatial_concat')(layers)
 
@@ -338,6 +345,7 @@ class BaseModel:
         os.makedirs(name, exist_ok=True)
         name = os.path.join(name, "weights")
         self.model.save_weights("{}_{}.h5".format(name, num_iters))
+        self.model.save_weights("{}.h5".format(name))
         #name = os.path.join(name, "model")
         #self.model.save("{}_{}.h5".format(name, num_iters))
 
