@@ -198,8 +198,8 @@ class A2CRunner:
         screen2_last_pos = actions[3]
         screen2_last_pos = screen2_last_pos.reshape((obs_screen.shape[0:4] + (1,)))
 
-        obs_minimap = np.concatenate((obs_minimap, minimap_last_pos), axis=-1)  # concatenate last_actions minimap args
-        obs_screen = np.concatenate((obs_screen, screen_last_pos, screen2_last_pos), axis=-1)
+        #obs_minimap = np.concatenate((obs_minimap, minimap_last_pos), axis=-1)  # concatenate last_actions minimap args
+        #obs_screen = np.concatenate((obs_screen, screen_last_pos, screen2_last_pos), axis=-1)
 
         obs_available_actions = np.zeros((obs_minimap.shape[0], len(FUNCTIONS),))
         for i, ob in enumerate(obs):
