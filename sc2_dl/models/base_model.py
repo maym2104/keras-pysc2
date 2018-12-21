@@ -105,13 +105,9 @@ class BaseModel:
         #xs = Lambda(tf.split, arguments={'num_or_size_splits': input_shape[-1], 'axis': -1})(x)
         layers = []
 
-        def cat_case(feat_type=None, name=""):
-            if feat_type is None:
-                scale = 1
-                name = name
-            else:
-                scale = feat_type.scale
-                name = feat_type.name
+        def cat_case(feat_type):
+            scale = feat_type.scale
+            name = feat_type.name
             _model = Sequential(name=prefix + name + '_preprocess_model')
             _model.add(Lambda(lambda _x: k.one_hot(k.cast(k.squeeze(_x, axis=-1), dtype='int32'), scale),
                              name=prefix + '_preprocess_' + name + '_to_one_hot', input_shape=input_shape[:-1] + (1,),
@@ -141,14 +137,14 @@ class BaseModel:
                 raise NotImplementedError
             layers.append(layer)
 
-        for i in range(len(feature_types), input_shape[-1]):
-            last_action = cat_case(name="last_action_{}".format(i))(xs[i])
+        #for i in range(len(feature_types), input_shape[-1]):
+        #    last_action = cat_case(name="last_action_{}".format(i))(xs[i])
         #last_actions = Lambda(lambda _x: _x[:, :, :, len(feature_types):], name=prefix + '_select_last_act')(x)
         #if self.data_format == 'channels_first':
         #    last_actions = Permute((3, 1, 2), name=prefix + '_preprocess_last_act_to_NCHW')(last_actions)
         #last_actions = Conv2D(embed_size, 1, padding='same', activation='relu', name=prefix + '_preprocess_last_act_conv',
         #               data_format=self.data_format)(last_actions)
-            layers.append(last_action)
+        #    layers.append(last_action)
 
         y = Concatenate(axis=self.channel_axis, name=prefix + '_preprocess_spatial_concat')(layers)
 

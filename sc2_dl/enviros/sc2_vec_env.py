@@ -3,7 +3,7 @@
 
 from multiprocessing import Process, Pipe
 from baselines.common.vec_env import VecEnv, CloudpickleWrapper
-
+from pysc2.lib import protocol
 
 # below (worker, SubprocVecEnv) copied and adapted from
 # https://github.com/openai/baselines/blob/master/baselines/common/vec_env/subproc_vec_env.py
@@ -15,10 +15,18 @@ def worker(remote, parent_remote, env_fn_wrapper, agent):
     while True:
         cmd, data = remote.recv()
         if cmd == 'step':
-            timesteps = env.step(data)
+            try:
+                timesteps = env.step(data)
+            except protocol.ConnectionError:
+                env = env_fn_wrapper.x()
+                timesteps = env.reset()
             remote.send(timesteps)
         elif cmd == 'reset':
-            timesteps = env.reset()
+            try:
+                timesteps = env.reset()
+            except protocol.ConnectionError:
+                env = env_fn_wrapper.x()
+                timesteps = env.reset()
             agent.reset()
             remote.send(timesteps)
         elif cmd == 'reset_task':
