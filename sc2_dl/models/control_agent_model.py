@@ -244,7 +244,7 @@ class ControlAgentModel(BaseModel):
                                               for p_l, mask in zip(policy_losses[1:], input_masks)]
         policy_loss = Lambda(k.stack, arguments={'axis': -1})(policy_losses)
         policy_loss = Lambda(k.sum, arguments={'axis': -1})(policy_loss)
-        policy_loss = Lambda(lambda args: -k.mean(args[0] * args[1]), name='policy_loss')([adv, policy_loss])
+        policy_loss = Lambda(lambda args: k.mean(args[0]*args[1]), name='policy_loss')([adv, policy_loss])
 
         value_l = Lambda(lambda args: k.square(args[0] - args[1]) / 2., name='mse')([ret, val])
         value_l = Lambda(k.mean, name='value_loss')(value_l)
@@ -271,12 +271,12 @@ class ControlAgentModel(BaseModel):
                                      # loss_weights=[1., self.value_loss_coeff, entropy_coeff])
 
 
-#def policy_gradient_loss(args):
+def policy_gradient_loss(args):
 #    adv, y_true, y_pred = args
     #adv = k.squeeze(advantage, axis=-1)
     # y_true = K.cast(y_true, dtype='int32')
     # policy_loss = k.log(k.clip(tf.gather_nd(y_pred, y_true), 1e-12, 1.0))
-    # sparse_categorical_crossentropy(y_true, y_pred)  # self.compute_log_prob(y_true, y_pred)
+    policy_loss = sparse_categorical_crossentropy(y_true, y_pred)  # self.compute_log_prob(y_true, y_pred)
 #    policy_loss = adv * categorical_crossentropy(y_true, y_pred)
 
-#    return policy_loss
+    return policy_loss

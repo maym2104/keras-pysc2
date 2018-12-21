@@ -311,7 +311,7 @@ class BaseModel:
                                               for p_l, mask in zip(policy_losses[1:], masks)]
         policy_loss = Lambda(k.stack, arguments={'axis': -1})(policy_losses)
         policy_loss = Lambda(k.sum, arguments={'axis': -1})(policy_loss)
-        policy_loss = Lambda(lambda args: -k.mean(args[0]*args[1]), name='policy_loss')([adv, policy_loss])
+        policy_loss = Lambda(lambda args: k.mean(args[0]*args[1]), name='policy_loss')([adv, policy_loss])
 
         value_l = Lambda(lambda args: k.square(args[0]-args[1]) / 2., name='mse')([ret, val])
         value_l = Lambda(k.mean, name='value_loss')(value_l)
@@ -366,7 +366,7 @@ def policy_gradient_loss(args):
     #y_true = k.stack([k.arange(k.shape(y_true)[0]), k.cast(k.squeeze(y_true, axis=-1), dtype='int32')], axis=-1)
     y_true = k.squeeze(y_true, axis=-1)
     #policy_loss = k.log(k.clip(tf.gather_nd(y_pred, y_true), 1e-12, 1.))
-    policy_loss = -sparse_categorical_crossentropy(y_true, y_pred)  # self.compute_log_prob(y_true, y_pred)
+    policy_loss = sparse_categorical_crossentropy(y_true, y_pred)  # self.compute_log_prob(y_true, y_pred)
 
     return policy_loss
 
