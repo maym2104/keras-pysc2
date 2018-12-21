@@ -367,9 +367,10 @@ def policy_gradient_loss(args):
     y_true, y_pred = args
     #adv = k.squeeze(advantage, axis=-1)
 
-    y_true = k.stack([k.arange(k.shape(y_true)[0]), k.cast(k.squeeze(y_true, axis=-1), dtype='int32')], axis=-1)
-    policy_loss = k.log(k.clip(tf.gather_nd(y_pred, y_true), 1e-12, 1.))
-    #sparse_categorical_crossentropy(y_true, y_pred)  # self.compute_log_prob(y_true, y_pred)
+    #y_true = k.stack([k.arange(k.shape(y_true)[0]), k.cast(k.squeeze(y_true, axis=-1), dtype='int32')], axis=-1)
+    y_true = k.squeeze(y_true, axis=-1)
+    #policy_loss = k.log(k.clip(tf.gather_nd(y_pred, y_true), 1e-12, 1.))
+    policy_loss = -sparse_categorical_crossentropy(y_true, y_pred)  # self.compute_log_prob(y_true, y_pred)
 
     return policy_loss
 
