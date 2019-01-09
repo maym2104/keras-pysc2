@@ -256,6 +256,8 @@ class BaseModel:
 
         # summary
         if write_summary:
+            actions_summary = tf.Summary(value=[tf.Summary.Value(tag="action_label",
+                                                                simple_value=np.asscalar(np.any(acts[0].flatten())))])
             return_summary = tf.Summary(value=[tf.Summary.Value(tag="return",
                                                                 simple_value=np.asscalar(np.mean(returns.flatten())))])
             reward_summary = tf.Summary(value=[tf.Summary.Value(tag="reward",
@@ -265,6 +267,7 @@ class BaseModel:
             self.writer.add_summary(return_summary, global_step=step)
             self.writer.add_summary(reward_summary, global_step=step)
             self.writer.add_summary(adv_summary, global_step=step)
+            self.writer.add_summary(actions_summary, global_step=step)
             summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=loss), ])
             self.writer.add_summary(summary, global_step=step)
 
