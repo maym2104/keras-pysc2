@@ -257,7 +257,7 @@ class BaseModel:
         # summary
         if write_summary:
             actions_summary = tf.Summary(value=[tf.Summary.Value(tag="action_label",
-                                                                simple_value=np.asscalar(np.any(acts[0].flatten())))])
+                                                                 simple_value=np.asscalar(np.any(acts[0].flatten())))])
             return_summary = tf.Summary(value=[tf.Summary.Value(tag="return",
                                                                 simple_value=np.asscalar(np.mean(returns.flatten())))])
             reward_summary = tf.Summary(value=[tf.Summary.Value(tag="reward",
@@ -312,15 +312,17 @@ class BaseModel:
 
         policy_losses = [policy_losses[0]] + [Lambda(lambda args: args[0]*args[1])([p_l, mask])
                                               for p_l, mask in zip(policy_losses[1:], masks)]
-        policy_loss = Lambda(k.stack, arguments={'axis': -1})(policy_losses)
-        policy_loss = Lambda(k.sum, arguments={'axis': -1})(policy_loss)
+        #policy_loss = Lambda(k.stack, arguments={'axis': -1})(policy_losses)
+        #policy_loss = Lambda(k.sum, arguments={'axis': -1})(policy_loss)
+        policy_loss = Add()(policy_losses)
         policy_loss = Lambda(lambda args: k.mean(args[0]*args[1]), name='policy_loss')([adv, policy_loss])
 
         value_l = Lambda(lambda args: k.square(args[0]-args[1]) / 2., name='mse')([ret, val])
         value_l = Lambda(k.mean, name='value_loss')(value_l)
 
-        entrop = Lambda(k.stack, arguments={'axis': -1})(entropies)
-        entrop = Lambda(k.sum, arguments={'axis': -1})(entrop)
+        #entrop = Lambda(k.stack, arguments={'axis': -1})(entropies)
+        #entrop = Lambda(k.sum, arguments={'axis': -1})(entrop)
+        entrop = Add()(entropies)       #simon takes the mean before summing. Not inoryy.
         entrop = Lambda(lambda x: k.mean(x), name='entropy')(entrop)
 
         entropy_coeff = Lambda(lambda _x:
